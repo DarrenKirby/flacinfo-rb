@@ -11,17 +11,17 @@
 # * It parses zero or more picture blocks (METADATA_BLOCK_PICTURE)
 #   * It allows you to write the embedded images to a file.
 #
-# My goals are to create a nice native Ruby library interface which will allow
+# My goal is to create a nice native Ruby library interface which will allow
 # the user to mimic most functionality of the 'metaflac' binary programmatically.
 #
 # = Copyright and Disclaimer
 #
-# Copyright:: (c) 2006, 2007, 2014 Darren Kirby
+# Copyright:: (C) 2006 - 2014 Darren Kirby
 #
 # FlacInfo is free software. No warranty is provided and the author
 # cannot accept responsibility for lost or damaged files.
 #
-# License:: Ruby
+# License:: GPL3
 # Author:: Darren Kirby (mailto:bulliver@gmail.com)
 # Website:: https://github.com/DarrenKirby/flacinfo-rb
 #
@@ -35,18 +35,15 @@
 
 # FlacInfoError is raised for general user errors.
 # It will print a string that describes the problem.
-class FlacInfoError < StandardError
-end
+FlacInfoError = Class.new(StandardError)
 
 # FlacInfoReadError is raised when an error occurs parsing the Flac file.
 # It will print a string that describes in which block the error occured.
-class FlacInfoReadError < StandardError
-end
+FlacInfoReadError = Class.new(StandardError)
 
 # FlacInfoWriteError is raised when an error occurs writing the Flac file.
 # It will print a string that describes where the error occured.
-class FlacInfoWriteError < StandardError
-end
+FlacInfoWriteError = Class.new(StandardError)
 
 # Note: STREAMINFO is the only block guaranteed to be present in the Flac file.
 # All attributes will be present but empty if the associated block is not present in the Flac file,
@@ -361,7 +358,7 @@ class FlacInfo
   # If 'str' is in the form 'name=value' only exact matches
   # will be deleted. If 'str' is in the form 'name' any and all
   # comments named 'name' will be deleted. Returns 'true' if a
-  # comment was deleted, false otherwise. Remember to call 
+  # comment was deleted, false otherwise. Remember to call
   # 'update!' to write changes to the file.
   #
   def comment_del(name)
@@ -608,7 +605,7 @@ class FlacInfo
     picture_type = ["Other", "32x32 pixels file icon", "Other file icon", "Cover (front)", "Cover (back)",
                     "Leaflet page", "Media", "Lead artist/lead performer/soloist", "Artist/performer",
                     "Conductor", "Band/Orchestra", "Composer", "Lyricist/text writer", "Recording Location",
-                    "During recording", "During performance", "Movie/video screen capture", "A bright 
+                    "During recording", "During performance", "Movie/video screen capture", "A bright
                      coloured fish", "Illustration", "Band/artist logotype", "Publisher/Studio logotype"]
 
     begin
@@ -663,7 +660,7 @@ class FlacInfo
         @application['raw_data'] = @fp.read(@application['block_size'] - 4)
       end
     rescue
-      raise FlacInfoReadError, "Could not parse METADATA_BLOCK_APPLICATION" 
+      raise FlacInfoReadError, "Could not parse METADATA_BLOCK_APPLICATION"
     end
   end
 
@@ -793,7 +790,7 @@ class FlacInfo
       vorbis_comm_s += [@tags["vendor_tag"]].pack("A*")
       vorbis_comm_s += [@comment.length].pack("V")
       @comment.each do |c|
-        vorbis_comm_s += [c.length].pack("V")
+        vorbis_comm_s += [c.bytesize].pack("V")
         vorbis_comm_s += [c].pack("A*")
       end
       vorbis_comm_s

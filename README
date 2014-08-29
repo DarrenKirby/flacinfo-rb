@@ -1,7 +1,7 @@
 :: flacinfo-rb ::
 Author: Darren Kirby
-mailto:bulliver@badcomputer.org
-License: Ruby
+mailto:bulliver@gmail.com
+License: GPL3
 
  = Quick API docs =
 
@@ -40,5 +40,8 @@ update!           :: writes comment changes to disk
 write_picture(?)  :: write image from PICTURE block(s) to optional file
 
 The public methods and attributes are very well documented in the source itself. Please read
-there if you don't understand any of this.
+there if you don't understand any of this. You can also use Rdoc to generate HTML documentation.
 
+HELP: flacinfo-rb still does not parse cuesheets, as I have never encountered a flac file
+that contains one. If you have a flac file with a cuesheet please consider emailing it to
+me so I can add this remaining bit of code.
