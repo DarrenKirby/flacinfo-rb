@@ -808,7 +808,7 @@ class FlacInfo
       vcd = build_vorbis_comment_block            #  Build the VORBIS_COMMENT data
       vch = build_block_header(4, vcd.length, @vcb_last)  #  Build the VORBIS_COMMENT header
     end
-    
+
     #  Determine if we can shuffle the data or if a rewrite is necessary
     begin
       if not @padding.has_key?("block_size") or vcd.length > @padding['block_size']
