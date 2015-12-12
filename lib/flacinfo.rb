@@ -536,6 +536,7 @@ class FlacInfo
                   6 => "picture" }
 
     @metadata_blocks = []
+    @vcb_last = 0
     lastheader = 0
 
     until lastheader == 1
@@ -545,7 +546,7 @@ class FlacInfo
       lastheader = block_header[0].to_i & 1
       type = sprintf("%u", "0b#{block_header[1..7]}").to_i
       @metadata_blocks << [typetable[type], type, lastheader]
-
+      @vcb_last = 1 if type == 4 && lastheader
       if type >= typetable.size
         raise FlacInfoReadError, "Invalid block header type"
       end
@@ -803,10 +804,10 @@ class FlacInfo
     if @comments_changed == nil
       raise FlacInfoWriteError, "No changes to write"
     else
+      lastheader = @metadata_blocks
       vcd = build_vorbis_comment_block            #  Build the VORBIS_COMMENT data
-      vch = build_block_header(4, vcd.length, 0)  #  Build the VORBIS_COMMENT header
+      vch = build_block_header(4, vcd.length, @vcb_last)  #  Build the VORBIS_COMMENT header
     end
-
     #  Determine if we can shuffle the data or if a rewrite is necessary
     begin
       if not @padding.has_key?("block_size") or vcd.length > @padding['block_size']
