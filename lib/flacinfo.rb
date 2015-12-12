@@ -805,7 +805,6 @@ class FlacInfo
     if @comments_changed == nil
       raise FlacInfoWriteError, "No changes to write"
     else
-      lastheader = @metadata_blocks
       vcd = build_vorbis_comment_block            #  Build the VORBIS_COMMENT data
       vch = build_block_header(4, vcd.length, @vcb_last)  #  Build the VORBIS_COMMENT header
     end
