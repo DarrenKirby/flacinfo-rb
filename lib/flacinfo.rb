@@ -691,7 +691,7 @@ class FlacInfo
       end
 
       @comment.each do |c|
-        k,v = c.split("=")
+        k,v = c.split("=", 2)
         #  Vorbis spec says we can have more than one identical comment ie:
         #  comment[0]="Artist=Charlie Parker"
         #  comment[1]="Artist=Miles Davis"
