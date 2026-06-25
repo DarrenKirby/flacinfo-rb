@@ -1,16 +1,16 @@
-:: flacinfo-rb ::
+# :: flacinfo-rb ::
 Author: Darren Kirby
 mailto:bulliver@gmail.com
 License: GPL3
 
- = Quick API docs =
+## = Quick API docs =
 
- == Initializing ==
+## == Initializing ==
 
 require 'flacinfo'
 foo = FlacInfo.new("someSong.flac")
 
- == Public attributes ==
+## == Public attributes ==
 
 streaminfo   :: hash of STREAMINFO block metadata
 seektable    :: hash of arrays of seek points
@@ -22,7 +22,7 @@ cuesheet     :: hash of CUESHEET block metadata
 picture      :: hash of PICTURE block metadata
 flac_file    :: hash of APPLICATION Id 0x41544348 (Flac File) metadata if present
 
- == Public methods ==
+## == Public methods ==
 
 comment_add       :: adds a comment
 comment_del       :: deletes a comment

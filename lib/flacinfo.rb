@@ -16,13 +16,13 @@
 #
 # = Copyright and Disclaimer
 #
-# Copyright:: (C) 2006 - 2014 Darren Kirby
+# Copyright:: (C) 2006 - 2026 Darren Kirby
 #
 # FlacInfo is free software. No warranty is provided and the author
 # cannot accept responsibility for lost or damaged files.
 #
 # License:: GPL3
-# Author:: Darren Kirby (mailto:bulliver@gmail.com)
+# Author:: Darren Kirby (mailto:darren@dragonbyte.ca)
 # Website:: https://github.com/DarrenKirby/flacinfo-rb
 #
 # = More information
@@ -71,7 +71,7 @@ class FlacInfo
   # 'total_samples':: The total number of samples in stream.
   # 'md5':: MD5 signature of the unencoded audio data.
   attr_reader :streaminfo
-
+  
   # Hash of values extracted from the SEEKTABLE block. Keys are:
   # 'offset':: The SEEKTABLE block's offset from the beginning of the file (not including the block header).
   # 'block_size':: The size of the SEEKTABLE block (not including the block header).
