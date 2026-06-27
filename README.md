@@ -1,46 +1,46 @@
-# :: flacinfo-rb ::
+# flacinfo-rb
 
 - Author: Darren Kirby
-- mailto:bulliver@gmail.com
-- License: GPL3
+- mailto:darren@dragonbyte.ca
+- License: GPL2
 
-## = Quick API docs =
+## Quick API docs
 
-## == Initializing ==
+## Initializing
 
 ```ruby
 require 'flacinfo'
 foo = FlacInfo.new("someSong.flac")
 ```
 
-## == Public attributes ==
+## Public attributes
 
-- `streaminfo`   :: hash of STREAMINFO block metadata
-- `seektable`    :: hash of arrays of seek points
-- `comment`      :: array of VORBIS COMMENT block metadata
-- `tags`         :: user-friendly hash of Vorbis comment metadata key=value pairs
-- `application`  :: hash of APPLICATION block metadata
-- `padding`      :: hash of PADDING block metadata
-- `cuesheet`     :: hash of CUESHEET block metadata
-- `picture`      :: hash of PICTURE block metadata
-- `flac_file`    :: hash of APPLICATION Id 0x41544348 (Flac File) metadata if present
+- `streaminfo`   - hash of STREAMINFO block metadata
+- `seektable`    - hash of arrays of seek points
+- `comment`      - array of VORBIS COMMENT block metadata
+- `tags`         - user-friendly hash of Vorbis comment metadata key=value pairs
+- `application`  - hash of APPLICATION block metadata
+- `padding`      - hash of PADDING block metadata
+- `cuesheet`     - hash of CUESHEET block metadata
+- `picture`      - hash of PICTURE block metadata
+- `flac_file`    - hash of APPLICATION Id 0x41544348 (Flac File) metadata if present
 
-## == Public methods ==
+## Public methods
 
-- `comment_add`       :: adds a comment
-- `comment_del`       :: deletes a comment
-- `hastag('str')`     :: returns true if tags['str'] exists
-- `meta_flac`         :: prints all META BLOCKS. (Mostly) equivelant to 'metaflac --list'
-- `padding_add!(b)`   :: adds a PADDING block of size 'b' or 4096 bytes
-- `padding_del!`      :: deletes the PADDING block
-- `padding_resize!`   :: resizes (grow or shrink) a padding block to size 'b' or 4096 bytes
-- `print_seektable`   :: pretty-print seektable hash
-- `print_streaminfo`  :: pretty-print streaminfo hash
-- `print_tags`        :: pretty-print tags hash
-- `raw_data_dump(?)`  :: if passed a filename it will dump flac_file['raw_data'] to that file,
-                       otherwise it will dump it to the console (even if binary!)
-- `update!`           :: writes comment changes to disk
-- `write_picture(?)`  :: write image from PICTURE block(s) to optional file
+- `comment_add`       - adds a comment
+- `comment_del`       - deletes a comment
+- `hastag('str')`     - returns true if tags['str'] exists
+- `meta_flac`         - prints all META BLOCKS. (Mostly) equivelant to 'metaflac --list'
+- `padding_add!(b)`   - adds a PADDING block of size 'b' or 4096 bytes
+- `padding_del!`      - deletes the PADDING block
+- `padding_resize!`   - resizes (grow or shrink) a padding block to size 'b' or 4096 bytes
+- `print_seektable`   - pretty-print seektable hash
+- `print_streaminfo`  - pretty-print streaminfo hash
+- `print_tags`        - pretty-print tags hash
+- `raw_data_dump(?)`  - if passed a filename it will dump flac_file['raw_data'] to that file,
+                        otherwise it will dump it to the console (even if binary!)
+- `update!`           - writes comment changes to disk
+- `write_picture(?)`  - write image from PICTURE block(s) to optional file
 
 The public methods and attributes are very well documented in the source itself. Please read
 there if you don't understand any of this. You can also use Rdoc to generate HTML documentation.
