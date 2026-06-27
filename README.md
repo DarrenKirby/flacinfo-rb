@@ -4,6 +4,8 @@
 - mailto:darren@dragonbyte.ca
 - License: GPL2
 
+[![Gem Version](https://badge.fury.io/rb/flacinfo-rb.svg)](https://badge.fury.io/rb/flacinfo-rb)
+
 ## Quick API docs
 
 ## Initializing
