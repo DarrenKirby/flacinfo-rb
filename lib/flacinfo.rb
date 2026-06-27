@@ -514,7 +514,7 @@ class FlacInfo
     @padding     = {}
     @application = {}
     @cuesheet    = {}
-    @picture     = { 'n' => {} }
+    @picture     = { 'n' => 0 }
 
     header = @fp.read(4)
     #  First 4 bytes must be 0x66, 0x4C, 0x61, and 0x43
@@ -541,6 +541,7 @@ class FlacInfo
     end
 
     @fp.close
+    p @metadata_blocks
   end
 
   def parse_seektable
@@ -692,7 +693,7 @@ class FlacInfo
   # padding is just a bunch of '0' bytes
   def parse_padding
     @padding['block_size'] = @fp.read(3).unpack1('B*').to_i(2)
-    @padding['offset']     = @fp.tell
+    @padding['offset'] = @fp.tell
 
     @metadata_blocks[-1] << @padding['offset']
     @metadata_blocks[-1] << @padding['block_size']
@@ -749,7 +750,7 @@ class FlacInfo
   end
 
   #  Here we begin the FlacInfo write methods
-  
+
   #  Build a block header given a type, a size, and whether it is last
   def build_block_header(type, size, last)
     bit_string = format('%b%7b', last, type).gsub(' ', '0')
@@ -847,11 +848,13 @@ class FlacInfo
     flac = File.new(@filename, 'r+b')
     flac.binmode
 
-    flac.seek(@padding['offset'] + @padding['block_size'], IO::SEEK_CUR)
+    flac.seek(@padding['offset'] + @padding['block_size'], IO::SEEK_SET)
     rest_of_file = flac.read
 
     flac.seek(@padding['offset'] - 4, IO::SEEK_SET)
     flac.write(rest_of_file)
+    # Truncate the file at the 'new' end of file.
+    flac.truncate(flac.tell)
 
     nbh = build_block_header(new_last_block[1], new_last_block[4], 1)
 
@@ -875,7 +878,7 @@ class FlacInfo
     flac = File.new(@filename, 'r+b')
     flac.binmode
 
-    flac.seek(old_last_block[4] + old_last_block[3], IO::SEEK_CUR)
+    flac.seek(old_last_block[4] + old_last_block[3], IO::SEEK_SET)
     co = flac.tell
     rest_of_file = flac.read
     flac.seek(co, IO::SEEK_SET)
