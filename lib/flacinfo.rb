@@ -1,3 +1,5 @@
+# frozen_string_literal: true
+
 # = Description
 #
 # flacinfo-rb gives you access to low level information on Flac files.
@@ -32,20 +34,19 @@
 # * The Vorbis Comment spec is at:
 #   http://www.xiph.org/vorbis/doc/v-comment.html
 
-
 # FlacInfoError is raised for general user errors.
 # It will print a string that describes the problem.
 FlacInfoError = Class.new(StandardError)
 
 # FlacInfoReadError is raised when an error occurs parsing the Flac file.
-# It will print a string that describes in which block the error occured.
+# It will print a string that describes in which block the error occurred.
 FlacInfoReadError = Class.new(StandardError)
 
 # FlacInfoWriteError is raised when an error occurs writing the Flac file.
-# It will print a string that describes where the error occured.
+# It will print a string that describes where the error occurred.
 FlacInfoWriteError = Class.new(StandardError)
 
-# Note: STREAMINFO is the only block guaranteed to be present in the Flac file.
+# STREAMINFO is the only block guaranteed to be present in the Flac file.
 # All attributes will be present but empty if the associated block is not present in the Flac file,
 # except for 'picture' which will have the key 'n' with the value '0'.
 # All 'offset' and 'block_size' values do not include the block header. All block headers are 4 bytes
@@ -55,8 +56,8 @@ class FlacInfo
   # A list of 'standard field names' according to the Vorbis Comment specification. It is certainly
   # possible to use a non-standard name, but the spec recommends against it.
   # See: http://www.xiph.org/vorbis/doc/v-comment.html
-  STANDARD_FIELD_NAMES= %w/TITLE VERSION ALBUM TRACKNUMBER ARTIST PERFORMER COPYRIGHT LICENSE
-                           ORGANIZATION DESCRIPTION GENRE DATE LOCATION CONTACT ISRC/
+  STANDARD_FIELD_NAMES = %w[TITLE VERSION ALBUM TRACKNUMBER ARTIST PERFORMER COPYRIGHT LICENSE
+                            ORGANIZATION DESCRIPTION GENRE DATE LOCATION CONTACT ISRC].freeze
 
   # Hash of values extracted from the STREAMINFO block. Keys are:
   # 'offset':: The STREAMINFO block's offset from the beginning of the file (not including the block header).
@@ -71,7 +72,7 @@ class FlacInfo
   # 'total_samples':: The total number of samples in stream.
   # 'md5':: MD5 signature of the unencoded audio data.
   attr_reader :streaminfo
-  
+
   # Hash of values extracted from the SEEKTABLE block. Keys are:
   # 'offset':: The SEEKTABLE block's offset from the beginning of the file (not including the block header).
   # 'block_size':: The size of the SEEKTABLE block (not including the block header).
@@ -150,7 +151,7 @@ class FlacInfo
   #   FlacInfo.hastag?(tag)   -> bool
   #
   def hastag?(tag)
-    @tags["#{tag}"] ? true : false
+    @tags[tag.to_s] ? true : false
   end
 
   # Pretty print tags hash.
@@ -161,11 +162,9 @@ class FlacInfo
   # Raises FlacInfoError if METADATA_BLOCK_VORBIS_COMMENT is not present.
   #
   def print_tags
-    if @tags == {}
-      raise FlacInfoError, 'METADATA_BLOCK_VORBIS_COMMENT not present'
-    end
+    raise FlacInfoError, 'METADATA_BLOCK_VORBIS_COMMENT not present' if @tags == {}
 
-    @tags.each_pair { |key,val| puts "#{key}: #{val}" }
+    @tags.each_pair { |key, val| puts "#{key}: #{val}" }
     nil
   end
 
@@ -176,7 +175,7 @@ class FlacInfo
   #
   def print_streaminfo
     #  No test: METADATA_BLOCK_STREAMINFO must be present in valid Flac file
-    @streaminfo.each_pair { |key,val| puts "#{key}: #{val}" }
+    @streaminfo.each_pair { |key, val| puts "#{key}: #{val}" }
     nil
   end
 
@@ -188,9 +187,7 @@ class FlacInfo
   # Raises FlacInfoError if METADATA_BLOCK_SEEKTABLE is not present.
   #
   def print_seektable
-    if @seektable == {}
-      raise FlacInfoError, 'METADATA_BLOCK_SEEKTABLE not present'
-    end
+    raise FlacInfoError, 'METADATA_BLOCK_SEEKTABLE not present' if @seektable == {}
 
     puts "  seek points: #{@seektable['seek_points']}"
     n = 0
@@ -216,21 +213,24 @@ class FlacInfo
       puts "  type: #{block[1]} (#{block[0].upcase})"
       puts "  is last: #{block[2].zero? ? 'false' : 'true'}"
       case block[1]
-        when 0
-          meta_stream
-        when 1
-          meta_padd
-        when 2
-          meta_app
-        when 3
-          meta_seek
-        when 4
-          meta_vorb
-        when 5
-          meta_cue
-        when 6
-          pictures_seen += 1
-          meta_pict(pictures_seen)
+      when 0
+        meta_stream
+      when 1
+        meta_pad
+      when 2
+        meta_app
+      when 3
+        meta_seek
+      when 4
+        meta_vorb
+      when 5
+        meta_cue
+      when 6
+        pictures_seen += 1
+        meta_pict(pictures_seen)
+      else
+        # This will never run ... file already parsed.
+        raise FlacInfoError, 'Unknown metadata blocktype found'
       end
       n += 1
     end
@@ -248,22 +248,18 @@ class FlacInfo
   # if there is no Flac File data present.
   #
   def raw_data_dump(outfile = nil)
-    if @flac_file == {}
-      raise FlacInfoError, 'Flac File data not present'
-    end
+    raise FlacInfoError, 'Flac File data not present' if @flac_file == {}
 
     if outfile.nil?
       puts @flac_file['raw_data']
     else
-      if @flac_file['mime_type'] =~ /text/
-        f = File.new(outfile, 'w')
-        f.write(@flac_file['raw_data'])
-        f.close
-      else
-        f = File.new(outfile, 'wb')
-        f.write(@flac_file['raw_data'])
-        f.close
-      end
+      f = if @flac_file['mime_type'] =~ /text/
+            File.new(outfile, 'w')
+          else
+            File.new(outfile, 'wb')
+          end
+      f.write(@flac_file['raw_data'])
+      f.close
     end
   end
 
@@ -281,9 +277,7 @@ class FlacInfo
   # extension appended. The argument to ':n' is which image to write in case of multiples.
   #
   def write_picture(args = {})
-    if @picture['n'].zero?
-      raise FlacInfoError, 'There is no METADATA_BLOCK_PICTURE'
-    end
+    raise FlacInfoError, 'There is no METADATA_BLOCK_PICTURE' if @picture['n'].zero?
 
     n = if args.key?(:n)
           args[:n]
@@ -300,7 +294,7 @@ class FlacInfo
                 else
                   #  Try to use contents of "album" tag for the filename
                   "#{@tags['album']}#{n}.#{extension}"
-                          end
+                end
               else
                 "#{args[:outfile]}.#{extension}"
               end
@@ -348,7 +342,7 @@ class FlacInfo
     begin
       @comment << name
       @comments_changed = 1
-    rescue
+    rescue StandardError
       return false
     end
     true
@@ -390,11 +384,9 @@ class FlacInfo
   # size of the padding block. It defaults to 4096 bytes.
   # Returns true if successful, else false.
   #
-  def padding_add!(size=4096)
+  def padding_add!(size = 4096)
     @metadata_blocks.each do |type|
-      if type[0] == 'padding'
-        raise FlacInfoError, "PADDING block exists. Use 'padding_resize!'"
-      end
+      raise FlacInfoError, "PADDING block exists. Use 'padding_resize!'" if type[0] == 'padding'
     end
     build_padding_block(size) ? true : false
   end
@@ -420,24 +412,19 @@ class FlacInfo
   # size of the new padding block. It defaults to 4096 bytes.
   # Returns true if successful, else false.
   #
-  def padding_resize!(size=4096)
-    begin
-      remove_padding_block
-      build_padding_block(size)
-      true
-    rescue
-      false
-    end
+  def padding_resize!(size = 4096)
+    remove_padding_block
+    build_padding_block(size)
   end
 
   #--
   #  This cleans up the output when using FlacInfo in irb
-  def inspect #:nodoc:
-    s = "#<#{self.class}:0x#{(self.object_id*2).to_s(16)} "
+  def inspect # :nodoc:
+    s = "#<#{self.class}:0x#{(object_id * 2).to_s(16)} "
     @metadata_blocks.each do |blk|
       s += "(#{blk[0].upcase} size=#{blk[4]} offset=#{blk[3]}) "
     end
-    s += "\b>"
+    "#{s}\b>"
   end
   #++
 
@@ -446,7 +433,7 @@ class FlacInfo
   #  The following six methods are just helpers for meta_flac
   def meta_stream
     puts "  length: #{@streaminfo['block_size']}"
-    puts "  minumum blocksize: #{@streaminfo['minimum_block']} samples"
+    puts "  minimum blocksize: #{@streaminfo['minimum_block']} samples"
     puts "  maximum blocksize: #{@streaminfo['maximum_block']} samples"
     puts "  minimum framesize: #{@streaminfo['minimum_frame']} bytes"
     puts "  maximum framesize: #{@streaminfo['maximum_frame']} bytes"
@@ -457,7 +444,7 @@ class FlacInfo
     puts "  MD5 signature: #{@streaminfo['md5']}"
   end
 
-  def meta_padd
+  def meta_pad
     puts "  length: #{@padding['block_size']}"
   end
 
@@ -516,8 +503,8 @@ class FlacInfo
 
   #  This is where the 'real' parsing starts
   def parse_flac_meta_blocks
-    @fp = File.new(@filename, 'rb')  #  Our file pointer
-    @comments_changed = nil          #  Do we need to write a new VORBIS_BLOCK?
+    @fp = File.new(@filename, 'rb') #  Our file pointer
+    @comments_changed = nil #  Do we need to write a new VORBIS_BLOCK?
 
     #  These next 8 lines initialize our public data structures.
     @streaminfo  = {}
@@ -527,78 +514,72 @@ class FlacInfo
     @padding     = {}
     @application = {}
     @cuesheet    = {}
-    @picture     = {'n' => 0}
+    @picture     = { 'n' => {} }
 
     header = @fp.read(4)
     #  First 4 bytes must be 0x66, 0x4C, 0x61, and 0x43
-    if header != 'fLaC'
-      raise FlacInfoReadError, "#{@filename} does not appear to be a valid Flac file"
-    end
+    raise FlacInfoReadError, "#{@filename} does not appear to be a valid Flac file" if header != 'fLaC'
 
-    typetable = { 0 => 'streaminfo', 1 => 'padding', 2 => 'application',
-                  3 => 'seektable', 4 => 'vorbis_comment', 5 => 'cuesheet',
-                  6 => 'picture' }
+    type_table = { 0 => 'streaminfo', 1 => 'padding', 2 => 'application',
+                   3 => 'seektable', 4 => 'vorbis_comment', 5 => 'cuesheet',
+                   6 => 'picture' }
 
     @metadata_blocks = []
-    lastheader = 0
+    last_header = 0
 
-    until lastheader == 1
+    until last_header == 1
       #  first bit = Last-metadata-block flag
-      #  bits 2-8 = BLOCK_TYPE. See typetable above
+      #  bits 2-8 = BLOCK_TYPE. See type_table above
       block_header = @fp.read(1).unpack1('B*')
-      lastheader = block_header[0].to_i & 1
-      type = sprintf('%u', "0b#{block_header[1..7]}").to_i
-      @metadata_blocks << [typetable[type], type, lastheader]
+      last_header = block_header[0].to_i & 1
+      type = format('%u', "0b#{block_header[1..7]}").to_i
+      @metadata_blocks << [type_table[type], type, last_header]
 
-      if type >= typetable.size
-        raise FlacInfoReadError, 'Invalid block header type'
-      end
+      raise FlacInfoReadError, 'Invalid block header type' if type >= type_table.size
 
-      self.send "parse_#{typetable[type]}"
+      send "parse_#{type_table[type]}"
     end
 
     @fp.close
   end
 
   def parse_seektable
-    begin
-      @seektable['block_size']  = @fp.read(3).unpack1('B*').to_i(2)
-      @seektable['offset']      = @fp.tell
-      @seektable['seek_points'] = @seektable['block_size'] / 18
 
-      @metadata_blocks[-1] << @seektable['offset']
-      @metadata_blocks[-1] << @seektable['block_size']
+    @seektable['block_size'] = @fp.read(3).unpack1('B*').to_i(2)
+    @seektable['offset'] = @fp.tell
+    @seektable['seek_points'] = @seektable['block_size'] / 18
 
-      n = 0
-      @seektable['points'] = {}
+    @metadata_blocks[-1] << @seektable['offset']
+    @metadata_blocks[-1] << @seektable['block_size']
 
-      @seektable['seek_points'].times do
-        pt_arr = []
-        pt_arr << @fp.read(8).reverse.unpack1('V*')
-        pt_arr << @fp.read(8).reverse.unpack1('V*')
-        pt_arr << @fp.read(2).reverse.unpack1('v*')
-        @seektable['points'][n] = pt_arr
-        n += 1
-      end
+    n = 0
+    @seektable['points'] = {}
 
-    rescue
-      raise FlacInfoReadError, 'Could not parse METADATA_BLOCK_SEEKTABLE'
+    @seektable['seek_points'].times do
+      pt_arr = []
+      pt_arr << @fp.read(8).reverse.unpack1('V*')
+      pt_arr << @fp.read(8).reverse.unpack1('V*')
+      pt_arr << @fp.read(2).reverse.unpack1('v*')
+      @seektable['points'][n] = pt_arr
+      n += 1
     end
+
+  rescue StandardError => e
+    raise FlacInfoReadError, "Could not parse METADATA_BLOCK_SEEKTABLE: #{e.message}"
   end
 
-  #  Not parsed yet, I have no flacs with a cuesheet!
+  #  TODO: I finally found a flac file with a cuesheet!
   def parse_cuesheet
-    begin
-      @cuesheet['block_size'] = @fp.read(3).unpack1('B*').to_i(2)
-      @cuesheet['offset']     = @fp.tell
 
-      @metadata_blocks[-1] << @cuesheet['offset']
-      @metadata_blocks[-1] << @cuesheet['block_size']
+    @cuesheet['block_size'] = @fp.read(3).unpack1('B*').to_i(2)
+    @cuesheet['offset'] = @fp.tell
 
-      @fp.seek(@cuesheet['block_size'], IO::SEEK_CUR)
-    rescue
-      raise FlacInfoReadError, 'Could not parse METADATA_BLOCK_CUESHEET'
-    end
+    @metadata_blocks[-1] << @cuesheet['offset']
+    @metadata_blocks[-1] << @cuesheet['block_size']
+
+    @fp.seek(@cuesheet['block_size'], IO::SEEK_CUR)
+  rescue StandardError => e
+    raise FlacInfoReadError, "Could not parse METADATA_BLOCK_CUESHEET: #{e.message}"
   end
 
   def parse_picture
@@ -614,7 +595,7 @@ class FlacInfo
 
     begin
       @picture[n]['block_size'] = @fp.read(3).unpack1('B*').to_i(2)
-      @picture[n]['offset']     = @fp.tell
+      @picture[n]['offset'] = @fp.tell
 
       @metadata_blocks[-1] << @picture[n]['offset']
 
@@ -634,38 +615,36 @@ class FlacInfo
       @metadata_blocks[-1] << @picture[n]['block_size']
 
       @fp.seek(@picture[n]['raw_data_length'], IO::SEEK_CUR)
-    rescue
-      raise FlacInfoReadError, 'Could not parse METADATA_BLOCK_PICTURE'
+    rescue StandardError => e
+      raise FlacInfoReadError, "Could not parse METADATA_BLOCK_PICTURE: #{e.message}"
     end
   end
 
   def parse_application
-    begin
-      @application['block_size'] = @fp.read(3).unpack1('B*').to_i(2)
-      @application['offset']     = @fp.tell
+    @application['block_size'] = @fp.read(3).unpack1('B*').to_i(2)
+    @application['offset'] = @fp.tell
 
-      @metadata_blocks[-1] << @application['offset']
-      @metadata_blocks[-1] << @application['block_size']
+    @metadata_blocks[-1] << @application['offset']
+    @metadata_blocks[-1] << @application['block_size']
 
-      @application['ID'] = @fp.read(4).unpack1('H*')
+    @application['ID'] = @fp.read(4).unpack1('H*')
 
-      app_id = {'41544348' => 'Flac File', '43756573' => 'GoldWave Cue Points',
-                '4D754D4C' => 'MusicML', '46696361' => 'CUE Splitter',
-                '46746F6C' => 'flac-tools', '5346464C' => 'Sound Font FLAC',
-                '7065656D' => 'Parseable Embedded Extensible Metadata', '74756E65' => 'TagTuner',
-                '786D6364' => 'xmcd'}
+    app_id = { '41544348' => 'Flac File', '43756573' => 'GoldWave Cue Points',
+               '4D754D4C' => 'MusicML', '46696361' => 'CUE Splitter',
+               '46746F6C' => 'flac-tools', '5346464C' => 'Sound Font FLAC',
+               '7065656D' => 'Parseable Embedded Extensible Metadata', '74756E65' => 'TagTuner',
+               '786D6364' => 'xmcd' }
 
-      @application['name'] = "#{app_id[@application['ID']]}"
+    @application['name'] = app_id[@application['ID']].to_s
 
-      #  We only know how to parse data from 'Flac File'...
-      if @application['ID'] == '41544348'
-        parse_flac_file_contents(@application['block_size'] - 4)
-      else
-        @application['raw_data'] = @fp.read(@application['block_size'] - 4)
-      end
-    rescue
-      raise FlacInfoReadError, 'Could not parse METADATA_BLOCK_APPLICATION'
+    #  We only know how to parse data from 'Flac File'...
+    if @application['ID'] == '41544348'
+      parse_flac_file_contents(@application['block_size'] - 4)
+    else
+      @application['raw_data'] = @fp.read(@application['block_size'] - 4)
     end
+  rescue StandardError => e
+    raise FlacInfoReadError, "Could not parse METADATA_BLOCK_APPLICATION: #{e.message}"
   end
 
   #  Unlike most values in the Flac header
@@ -675,153 +654,146 @@ class FlacInfo
   #  @tags is a more user-friendly data structure with the values
   #  separated into key=value pairs
   def parse_vorbis_comment
-    begin
-      @tags['block_size'] = @fp.read(3).unpack1('B*').to_i(2)
-      @tags['offset']     = @fp.tell
+    @tags['block_size'] = @fp.read(3).unpack1('B*').to_i(2)
+    @tags['offset']     = @fp.tell
 
-      @metadata_blocks[-1] << @tags['offset']
-      @metadata_blocks[-1] << @tags['block_size']
+    @metadata_blocks[-1] << @tags['offset']
+    @metadata_blocks[-1] << @tags['block_size']
 
-      vendor_length = @fp.read(4).reverse.unpack1('B*').to_i(2)
+    vendor_length = @fp.read(4).reverse.unpack1('B*').to_i(2)
 
-      @tags['vendor_tag']      = @fp.read(vendor_length)
-      user_comment_list_length = @fp.read(4).reverse.unpack1('B*').to_i(2)
+    @tags['vendor_tag'] = @fp.read(vendor_length)
+    user_comment_list_length = @fp.read(4).reverse.unpack1('B*').to_i(2)
 
-      n = 0
-      user_comment_list_length.times do
-        length = @fp.read(4).reverse.unpack1('B*').to_i(2)
-        @comment[n] = @fp.read(length)
-        n += 1
-      end
-
-      @comment.each do |c|
-        k,v = c.split('=', 2)
-        #  Vorbis spec says we can have more than one identical comment ie:
-        #  comment[0]="Artist=Charlie Parker"
-        #  comment[1]="Artist=Miles Davis"
-        #  so we just append the second and subsequent values to the first
-        @tags[k] = if @tags.key?(k)
-                     "#{@tags[k]}, #{v}"
-                   else
-                     v
-                   end
-      end
-
-    rescue
-      raise FlacInfoReadError, 'Could not parse METADATA_BLOCK_VORBIS_COMMENT'
+    n = 0
+    user_comment_list_length.times do
+      length = @fp.read(4).reverse.unpack1('B*').to_i(2)
+      @comment[n] = @fp.read(length)
+      n += 1
     end
+
+    @comment.each do |c|
+      k, v = c.split('=', 2)
+      #  Vorbis spec says we can have more than one identical comment ie:
+      #  comment[0]="Artist=Charlie Parker"
+      #  comment[1]="Artist=Miles Davis"
+      #  so we just append the second and subsequent values to the first
+      @tags[k] = if @tags.key?(k)
+                   "#{@tags[k]}, #{v}"
+                 else
+                   v
+                 end
+    end
+
+  rescue StandardError => e
+    raise FlacInfoReadError, "Could not parse METADATA_BLOCK_VORBIS_COMMENT: #{e.message}"
   end
 
   # padding is just a bunch of '0' bytes
   def parse_padding
-    begin
-      @padding['block_size'] = @fp.read(3).unpack1('B*').to_i(2)
-      @padding['offset']     = @fp.tell
+    @padding['block_size'] = @fp.read(3).unpack1('B*').to_i(2)
+    @padding['offset']     = @fp.tell
 
-      @metadata_blocks[-1] << @padding['offset']
-      @metadata_blocks[-1] << @padding['block_size']
+    @metadata_blocks[-1] << @padding['offset']
+    @metadata_blocks[-1] << @padding['block_size']
 
-      @fp.seek(@padding['block_size'], IO::SEEK_CUR)
-    rescue
-      raise FlacInfoReadError, 'Could not parse METADATA_BLOCK_PADDING'
-    end
+    @fp.seek(@padding['block_size'], IO::SEEK_CUR)
+  rescue StandardError => e
+    raise FlacInfoReadError, "Could not parse METADATA_BLOCK_PADDING: #{e.message}"
   end
 
   def parse_streaminfo
-    begin
-      @streaminfo['block_size']    = @fp.read(3).unpack1('B*').to_i(2)
-      @streaminfo['offset']        = @fp.tell
+    @streaminfo['block_size'] = @fp.read(3).unpack1('B*').to_i(2)
+    @streaminfo['offset'] = @fp.tell
 
-      @metadata_blocks[-1] << @streaminfo['offset']
-      @metadata_blocks[-1] << @streaminfo['block_size']
+    @metadata_blocks[-1] << @streaminfo['offset']
+    @metadata_blocks[-1] << @streaminfo['block_size']
 
-      @streaminfo['minimum_block'] = @fp.read(2).reverse.unpack1('v*')
-      @streaminfo['maximum_block'] = @fp.read(2).reverse.unpack1('v*')
-      @streaminfo['minimum_frame'] = @fp.read(3).reverse.unpack1('v*')
-      @streaminfo['maximum_frame'] = @fp.read(3).reverse.unpack1('v*')
+    @streaminfo['minimum_block'] = @fp.read(2).reverse.unpack1('v*')
+    @streaminfo['maximum_block'] = @fp.read(2).reverse.unpack1('v*')
+    @streaminfo['minimum_frame'] = @fp.read(3).reverse.unpack1('v*')
+    @streaminfo['maximum_frame'] = @fp.read(3).reverse.unpack1('v*')
 
-      #  64 bits in MSB order
-      bitstring = @fp.read(8).unpack1('B*')
-      #  20 bits :: Sample rate in Hz.
-      @streaminfo['samplerate']      = sprintf('%u', "0b#{bitstring[0..19]}").to_i
-      #  3 bits :: (number of channels)-1
-      @streaminfo['channels']        = sprintf('%u', "0b#{bitstring[20..22]}").to_i + 1
-      #  5 bits :: (bits per sample)-1
-      @streaminfo['bits_per_sample'] = sprintf('%u', "0b#{bitstring[23..27]}").to_i + 1
-      #  36 bits :: Total samples in stream.
-      @streaminfo['total_samples']   = sprintf('%u', "0b#{bitstring[28..63]}").to_i
+    #  64 bits in MSB order
+    bitstring = @fp.read(8).unpack1('B*')
 
-      #  128 bits :: MD5 signature of the unencoded audio data.
-      @streaminfo['md5'] = @fp.read(16).unpack1('H32')
-    rescue
-      raise FlacInfoReadError, 'Could not parse METADATA_BLOCK_STREAMINFO'
-    end
+    #  20 bits :: Sample rate in Hz.
+    @streaminfo['samplerate'] = format('%u', "0b#{bitstring[0..19]}").to_i
+
+    #  3 bits :: (number of channels)-1
+    @streaminfo['channels'] = format('%u', "0b#{bitstring[20..22]}").to_i + 1
+
+    #  5 bits :: (bits per sample)-1
+    @streaminfo['bits_per_sample'] = format('%u', "0b#{bitstring[23..27]}").to_i + 1
+
+    #  36 bits :: Total samples in stream.
+    @streaminfo['total_samples'] = format('%u', "0b#{bitstring[28..63]}").to_i
+
+    #  128 bits :: MD5 signature of the unencoded audio data.
+    @streaminfo['md5'] = @fp.read(16).unpack1('H32')
+  rescue StandardError => e
+    raise FlacInfoReadError, "Could not parse METADATA_BLOCK_STREAMINFO: #{e.message}"
   end
 
   #  See http://firestuff.org/flacfile/
   def parse_flac_file_contents(size)
-    begin
-      @flac_file = {}
-      desc_length = @fp.read(1).unpack1('C')
-      @flac_file['description'] = @fp.read(desc_length)
-      mime_length = @fp.read(1).reverse.unpack1('C')
-      @flac_file['mime_type'] = @fp.read(mime_length)
-      size = size - 2 - desc_length - mime_length
-      @flac_file['raw_data'] = @fp.read(size)
-    rescue
-      raise FlacInfoReadError, 'Could not parse Flac File data'
-    end
+    @flac_file = {}
+    desc_length = @fp.read(1).unpack1('C')
+    @flac_file['description'] = @fp.read(desc_length)
+    mime_length = @fp.read(1).reverse.unpack1('C')
+    @flac_file['mime_type'] = @fp.read(mime_length)
+    size = size - 2 - desc_length - mime_length
+    @flac_file['raw_data'] = @fp.read(size)
+  rescue StandardError => e
+    raise FlacInfoReadError, "Could not parse Flac File data: #{e.message}"
   end
 
   #  Here we begin the FlacInfo write methods
-
-
+  
   #  Build a block header given a type, a size, and whether it is last
   def build_block_header(type, size, last)
-    begin
-      bit_string = sprintf('%b%7b', last, type).gsub(' ','0')
-      block_header_s = [bit_string].pack('B*')
-      block_header_s += [size].pack('VX').reverse # size is 3 bytes
-    rescue
-      raise FlacInfoWriteError, 'error building block header'
-    end
+    bit_string = format('%b%7b', last, type).gsub(' ', '0')
+    block_header_s = [bit_string].pack('B*')
+    block_header_s + [size].pack('VX').reverse # size is 3 bytes
+  rescue StandardError => e
+    raise FlacInfoWriteError, "error building block header: #{e.message}"
   end
 
   #  Build a string of packed data for the Vorbis comments
   def build_vorbis_comment_block
-    begin
-      vorbis_comm_s  = [@tags['vendor_tag'].length].pack('V')
-      vorbis_comm_s += [@tags['vendor_tag']].pack('A*')
-      vorbis_comm_s += [@comment.length].pack('V')
-      @comment.each do |c|
-        vorbis_comm_s += [c.bytesize].pack('V')
-        vorbis_comm_s += [c].pack('A*')
-      end
-      vorbis_comm_s
-    rescue
-      raise FlacInfoWriteError, 'error building vorbis comment block'
+    vorbis_comm_s  = [@tags['vendor_tag'].length].pack('V')
+    vorbis_comm_s += [@tags['vendor_tag']].pack('A*')
+    vorbis_comm_s += [@comment.length].pack('V')
+
+    @comment.each do |c|
+      vorbis_comm_s += [c.bytesize].pack('V')
+      vorbis_comm_s += [c].pack('A*')
     end
+
+    vorbis_comm_s
+  rescue StandardError => e
+    raise FlacInfoWriteError, "error building vorbis comment block: #{e.message}"
   end
 
   def write_to_disk
-    if @comments_changed.nil?
-      raise FlacInfoWriteError, 'No changes to write'
-    else
-      vcd = build_vorbis_comment_block            #  Build the VORBIS_COMMENT data
-      vch = build_block_header(4, vcd.length, 0)  #  Build the VORBIS_COMMENT header
-    end
+    raise FlacInfoWriteError, 'No changes to write' if @comments_changed.nil?
+
+    #  Build the VORBIS_COMMENT data
+    vcd = build_vorbis_comment_block
+    #  Build the VORBIS_COMMENT header
+    vch = build_block_header(4, vcd.length, 0)
 
     #  Determine if we can shuffle the data or if a rewrite is necessary
     begin
-      if !@padding.key?('block_size') or vcd.length > @padding['block_size']
+      if !@padding.key?('block_size') || (vcd.length > @padding['block_size'])
         rewrite(vcd, vch)  # Rewriting is simpler but more expensive
       else
         shuffle(vcd, vch)  # Shuffling is more complicated but cheaper
       end
       parse_flac_meta_blocks #  Parse the file again to update new values
       true
-    rescue
-      raise FlacInfoWriteError, "error writing new data to #{@filename}"
+    rescue StandardError => e
+      raise FlacInfoWriteError, "error writing new data to #{@filename}: #{e.message}"
     end
   end
 
@@ -870,61 +842,57 @@ class FlacInfo
 
   # remove the padding block
   def remove_padding_block
-    begin
-      new_last_block = @metadata_blocks[-2]
+    new_last_block = @metadata_blocks[-2]
 
-      flac = File.new(@filename, 'r+b')
-      flac.binmode
+    flac = File.new(@filename, 'r+b')
+    flac.binmode
 
-      flac.seek(@padding['offset'] + @padding['block_size'], IO::SEEK_CUR)
-      rest_of_file = flac.read()
+    flac.seek(@padding['offset'] + @padding['block_size'], IO::SEEK_CUR)
+    rest_of_file = flac.read
 
-      flac.seek(@padding['offset'] - 4, IO::SEEK_SET)
-      flac.write(rest_of_file)
+    flac.seek(@padding['offset'] - 4, IO::SEEK_SET)
+    flac.write(rest_of_file)
 
-      nbh = build_block_header(new_last_block[1], new_last_block[4], 1)
+    nbh = build_block_header(new_last_block[1], new_last_block[4], 1)
 
-      flac.seek(new_last_block[3] - 4, IO::SEEK_SET)
-      flac.write(nbh)
-      flac.close()
+    flac.seek(new_last_block[3] - 4, IO::SEEK_SET)
+    flac.write(nbh)
+    flac.close
 
-      parse_flac_meta_blocks  #  Parse the file again to update new values
-      true
-    rescue
-      false
-    end
+    parse_flac_meta_blocks  #  Parse the file again to update new values
+    true
+  rescue StandardError => e
+    raise FlacInfoWriteError, "Could not update padding block: #{e.message}"
   end
 
   def build_padding_block(size)
-    begin
-      old_last_block = @metadata_blocks[-1]
+    old_last_block = @metadata_blocks[-1]
 
-      a = Array.new(size / 2, 0)
-      pbd = a.pack('v*')
-      pbh = build_block_header(1, size, 1)
+    a = Array.new(size / 2, 0)
+    pbd = a.pack('v*')
+    pbh = build_block_header(1, size, 1)
 
-      flac = File.new(@filename, 'r+b')
-      flac.binmode
+    flac = File.new(@filename, 'r+b')
+    flac.binmode
 
-      flac.seek(old_last_block[4] + old_last_block[3], IO::SEEK_CUR)
-      co = flac.tell
-      rest_of_file = flac.read
-      flac.seek(co, IO::SEEK_SET)
+    flac.seek(old_last_block[4] + old_last_block[3], IO::SEEK_CUR)
+    co = flac.tell
+    rest_of_file = flac.read
+    flac.seek(co, IO::SEEK_SET)
 
-      flac.write(pbh)
-      flac.write(pbd)
-      flac.write(rest_of_file)
-      nbh = build_block_header(old_last_block[1], old_last_block[4], 0)
+    flac.write(pbh)
+    flac.write(pbd)
+    flac.write(rest_of_file)
+    nbh = build_block_header(old_last_block[1], old_last_block[4], 0)
 
-      flac.seek(old_last_block[3] - 4, IO::SEEK_SET)
-      flac.write(nbh)
+    flac.seek(old_last_block[3] - 4, IO::SEEK_SET)
+    flac.write(nbh)
 
-      flac.close
-      parse_flac_meta_blocks  #  Parse the file again to update new values
-      true
-    rescue
-      false
-    end
+    flac.close
+    parse_flac_meta_blocks  #  Parse the file again to update new values
+    true
+  rescue StandardError => e
+    raise FlacInfoWriteError, "Could not update padding block: #{e.message}"
   end
 end
 
