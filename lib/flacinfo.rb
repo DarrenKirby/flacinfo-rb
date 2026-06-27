@@ -21,7 +21,7 @@
 # FlacInfo is free software. No warranty is provided and the author
 # cannot accept responsibility for lost or damaged files.
 #
-# License:: GPL3
+# License:: GPL2
 # Author:: Darren Kirby (mailto:darren@dragonbyte.ca)
 # Website:: https://github.com/DarrenKirby/flacinfo-rb
 #
