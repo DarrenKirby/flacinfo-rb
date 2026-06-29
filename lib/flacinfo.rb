@@ -29,8 +29,9 @@
 #
 # = More information
 #
-# * The Flac spec is at:
-#   http://flac.sourceforge.net/format.html
+# * The Flac spec has been made an official RFC. This RFC, and a simplified (read: easier to understand) spec are at:
+#   https://datatracker.ietf.org/doc/rfc9639/
+#   https://xiph.org/flac/old_format.html
 # * The Vorbis Comment spec is at:
 #   http://www.xiph.org/vorbis/doc/v-comment.html
 
@@ -46,6 +47,526 @@ FlacInfoReadError = Class.new(StandardError)
 # It will print a string that describes where the error occurred.
 FlacInfoWriteError = Class.new(StandardError)
 
+# The Stream class models the flac file as a whole. It contains an array of class objects that represent the
+# METADATA_BLOCK_DATA blocks in order and a pointer to the actual FRAME audio data. A FLAC bitstream consists of the
+# "fLaC" marker at the beginning of the stream, followed by a mandatory metadata block (called the STREAMINFO block),
+# any number of other metadata blocks, then the audio frames.
+class Stream
+  attr_reader :blocks, :frame_data
+
+  def initialize(path)
+    @filename = path
+    @blocks = []
+    @frame_data = nil
+    @io = File.open(@filename)
+    parse_file
+  end
+
+  # These blocks may only occur once in the flac file.
+  def streaminfo
+    @blocks.find { |b| b.is_a?(Streaminfo) }
+  end
+
+  def seektable
+    @blocks.find { |b| b.is_a?(Seektable) }
+  end
+
+  def cuesheet
+    @blocks.find { |b| b.is_a?(Cuesheet) }
+  end
+
+  def vorbis_comment
+    @blocks.find { |b| b.is_a?(VorbisComment) }
+  end
+
+  # These blocks may occur multiple times.
+  def applications
+    @blocks.find { |b| b.is_a?(Application) }
+  end
+
+  def application
+    self.applications.first
+  end
+
+  def pictures
+    @blocks.grep(Picture)
+  end
+
+  def picture
+    self.pictures.first
+  end
+
+  def padding
+    @blocks.grep(Padding)
+  end
+
+  private
+
+  def read_header
+    header = BlockHeader.read(@io)
+    klass = BLOCK_TYPES.fetch(header.type, Unknown)
+    @blocks << klass.new(@io, header)
+    header.is_last
+  end
+
+  def parse_file
+    stream_marker = @io.read(4)
+    #  First 4 bytes must be 0x66, 0x4C, 0x61, and 0x43
+    if stream_marker != 'fLaC'
+      raise FlacInfoReadError,
+            "#{@filename} does not appear to be a valid Flac file"
+    end
+
+    last = 0
+    last = read_header until last == 1
+
+    # The rest of the file is FRAME audio data.
+    @frame_data = @io.read
+    @io.close
+  end
+end
+
+# BlockHeader knows how to parse the METADATA_BLOCK_HEADER. Every header is eactly 4 bytes in length. The first byte
+# contains a bit-flag which declares if it is the last block, and 7 bits which represent the type. The other 3 bytes
+# contain the length of the block, not including the header.
+class BlockHeader
+  attr_reader :type, :block_size, :offset, :is_last
+
+  def self.read(io)
+    #  first bit = Last-metadata-block flag
+    #  bits 2-8 = BLOCK_TYPE. See type_table above
+    block_header = io.read(1).unpack1('C')
+    is_last = (block_header >> 7) & 0xF
+    type = block_header & 0x7F
+    # 7-126 are reserved, and will be implemented as Unknown.
+    # 127 is explicitly labelled as 'invalid' by the spec.
+    raise FlacInfoReadError, 'Invalid block header type' if type == 127
+
+    block_size = "\u0000#{io.read(3)}".unpack1('N')
+    offset = io.tell
+    new(type, block_size, offset, is_last)
+  end
+
+  def initialize(type, block_size, offset, is_last)
+    @type       = type
+    @block_size = block_size
+    @offset     = offset
+    @is_last    = is_last
+  end
+end
+
+# Block is a superclass that contains the attributes common to all
+# METADATA_BLOCK_DATA blocks, regardless of type.
+class Block
+  include Enumerable
+  attr_reader :type, :block_size, :offset, :is_last
+
+  def initialize(header)
+    @type       = header.type
+    @block_size = header.block_size
+    @offset     = header.offset
+    @is_last    = header.is_last
+  end
+
+  def each
+    self.class::FIELDS.each do |field|
+      yield field, public_send(field)
+    end
+  end
+
+  alias each_pair each
+
+  def to_h
+    each.to_h
+  end
+
+  def [](key)
+    public_send(key.to_sym)
+  rescue NoMethodError
+    raise FlacInfoError, "No such key: #{key}"
+  end
+
+  # def [](key)
+  #   public_send(key)
+  # rescue NoMethodError
+  #   raise FlacInfoError, "No such key: #{key}"
+  # end
+  #
+  # def each_pair
+  #   self.class::FIELDS.each do |field|
+  #     yield field, public_send(field)
+  #   end
+  # end
+  #
+  # def keys
+  #   self.class::FIELDS
+  # end
+  #
+  # def to_h
+  #   self.class::FIELDS.to_h do |field|
+  #     [field, public_send(field)]
+  #   end
+  # end
+end
+
+# This block has information about the whole stream, like sample rate, number of channels, total number of samples, etc.
+# It must be present as the first metadata block in the stream. Other metadata blocks may follow, and ones that the
+# decoder doesn't understand, it will skip.
+class Streaminfo < Block
+  attr_reader :minimum_block, :maximum_block, :minimum_frame, :maximum_frame, :samplerate, :channels, :bits_per_sample,
+              :total_samples, :md5
+
+  FIELDS = %w[offset block_size minimum_block maximum_block minimum_frame maximum_frame samplerate channels
+              bits_per_sample total_samples md5].freeze
+  BLOCK_NAME = 'STREAMINFO'
+
+  def initialize(io, header)
+    super(header)
+    @io = io
+    parse_streaminfo
+  end
+
+  private
+
+  def parse_channels_and_samples
+    #  64 bits in big-endian order
+    value = @io.read(8).unpack1('Q>')
+    #  20 bits :: Sample rate in Hz.
+    @samplerate = (value >> 44) & 0xFFFFF
+    #  3 bits :: (number of channels) - 1.
+    @channels = ((value >> 41) & 0x7) + 1
+    #  5 bits :: (bits per sample) - 1.
+    @bits_per_sample = ((value >> 36) & 0x1F) + 1
+    #  36 bits :: Total samples in stream.
+    @total_samples = value & 0xFFFFFFFFF
+  end
+
+  def parse_blocks_and_frames
+    @minimum_block = @io.read(2).unpack1('n*')
+    @maximum_block = @io.read(2).unpack1('n*')
+    @minimum_frame = @io.read(3).unpack1('n*')
+    @maximum_frame = @io.read(3).unpack1('n*')
+  end
+
+  def parse_streaminfo
+    parse_blocks_and_frames
+    parse_channels_and_samples
+
+    #  128 bits :: MD5 signature of the unencoded audio data.
+    @md5 = @io.read(16).unpack1('H32')
+  rescue StandardError => e
+    raise FlacInfoReadError, "Could not parse METADATA_BLOCK_STREAMINFO: #{e.message}"
+  end
+end
+
+# This block allows for an arbitrary amount of padding. The contents of a PADDING block have no meaning. This block is
+# useful when it is known that metadata will be edited after encoding; the user can instruct the encoder to reserve a
+# PADDING block of sufficient size so that when metadata is added, it will simply overwrite the padding (which is
+# relatively quick) instead of having to insert it into the right place in the existing file (which would normally
+# require rewriting the entire file).
+class Padding < Block
+  attr_reader :offset, :block_size
+
+  FIELDS = %w[offset block_size].freeze
+  BLOCK_NAME = 'PADDING'
+
+  def initialize(io, header)
+    super(header)
+    @io = io
+    parse_padding
+  end
+
+  private
+
+  def parse_padding
+    # Padding is just zero-bytes * block_size, so there's nothing really to parse. We just need to fast-forward to the
+    # end of the padding block.
+    @io.seek(@block_size, IO::SEEK_CUR)
+  rescue StandardError => e
+    raise FlacInfoReadError, "Could not parse METADATA_BLOCK_PADDING: #{e.message}"
+  end
+end
+
+# This is an optional block for storing seek points. It is possible to seek to any given sample in a FLAC stream without
+# a seek table, but the delay can be unpredictable since the bitrate may vary widely within a stream. By adding seek
+# points to a stream, this delay can be significantly reduced. Each seek point takes 18 bytes, so 1% resolution within a
+# stream adds less than 2k. There can be only one SEEKTABLE in a stream, but the table can have any number of seek
+# points. There is also a special 'placeholder' seekpoint which will be ignored by decoders but which can be used to
+# reserve space for future seek point insertion.
+class Seektable < Block
+  attr_reader :seek_points, :points
+
+  FIELDS = %w[offset block_size seek_points points].freeze
+  BLOCK_NAME = 'SEEKTABLE'
+
+  def initialize(io, header)
+    super(header)
+    @io = io
+    parse_seektable
+  end
+
+  private
+
+  def parse_points
+    n = 0
+    @seek_points.times do
+      pt_arr = []
+      pt_arr << @io.read(8).unpack1('Q>')
+      pt_arr << @io.read(8).unpack1('Q>')
+      pt_arr << @io.read(2).unpack1('S>')
+      @points[n] = pt_arr
+      n += 1
+    end
+  end
+
+  def parse_seektable
+    @seek_points = @block_size / 18
+    @points = {}
+    parse_points
+  rescue StandardError => e
+    raise FlacInfoReadError, "Could not parse METADATA_BLOCK_SEEKTABLE: #{e.message}"
+  end
+end
+
+# This block is for storing various information that can be used in a cue sheet. It supports track and index points,
+# compatible with Red Book CD digital audio discs, as well as other CD-DA metadata such as media catalogue number and
+# track ISRCs. The CUESHEET block is especially useful for backing up CD-DA discs, but it can be used as a general
+# purpose cueing mechanism for playback.
+class Cuesheet < Block
+
+  FIELDS = %w[offset block_size].freeze
+  BLOCK_NAME = 'CUESHEET'
+
+  def initialize(io, header)
+    super(header)
+    @io = io
+  end
+
+  private
+
+  # TODO: I do have a flac file with a cuesheet now, so this needs to be implemented.
+  def parse_seektable; end
+end
+
+# This block is for storing pictures associated with the file, most commonly cover art from CDs. There may be more than
+# one PICTURE block in a file. The picture format is similar to the APIC frame in ID3v2. The PICTURE block has a type,
+# MIME type, and UTF-8 description like ID3v2, and supports external linking via URL (though this is discouraged). The
+# differences are that there is no uniqueness constraint on the description field, and the MIME type is mandatory. The
+# FLAC PICTURE block also includes the resolution, colour depth, and palette size so that the client can search for a
+# suitable picture without having to scan them all.
+class Picture < Block
+  attr_reader :type_int, :type_string, :description_string, :mime_type, :colour_depth, :n_colours, :width, :height,
+              :raw_data_offset, :raw_data_length
+
+  PICTURE_TYPE = ['Other', '32x32 pixels file icon', 'Other file icon', 'Cover (front)', 'Cover (back)', 'Leaflet page',
+                  'Media', 'Lead artist/lead performer/soloist', 'Artist/performer', 'Conductor', 'Band/Orchestra',
+                  'Composer', 'Lyricist/text writer', 'Recording Location', 'During recording', 'During performance',
+                  'Movie/video screen capture', 'A bright coloured fish', 'Illustration', 'Band/artist logotype',
+                  'Publisher/Studio logotype'].freeze
+  FIELDS = %w[offset block_size type_int type_string description_string mime_type colour_depth n_colours width height
+              raw_data_offset raw_data_length].freeze
+  BLOCK_NAME = 'PICTURE'
+
+  def initialize(io, header)
+    super(header)
+    @io = io
+    parse_picture
+  end
+
+  def to_h
+    FIELDS.to_h { |field| [field, public_send(field)] }
+  end
+
+  private
+
+  def parse_picture
+    begin
+      # The picture type according to the ID3v2 APIC frame
+      @type_int           = @io.read(4).reverse.unpack1('v*')
+      @type_string        = PICTURE_TYPE[@type_int]
+      mime_length         = @io.read(4).reverse.unpack1('v*')
+      @mime_type          = @io.read(mime_length).unpack1('a*')
+      description_length  = @io.read(4).reverse.unpack1('v*')
+      @description_string = @io.read(description_length).unpack1('M*')
+      @width              = @io.read(4).reverse.unpack1('v*')
+      @height             = @io.read(4).reverse.unpack1('v*')
+      @colour_depth       = @io.read(4).reverse.unpack1('v*')
+      @n_colours          = @io.read(4).reverse.unpack1('v*')
+      @raw_data_length    = @io.read(4).reverse.unpack1('V*')
+      @raw_data_offset    = @io.tell
+      # Fast-forward over the picture data to the next block header.
+      @io.seek(@raw_data_length, IO::SEEK_CUR)
+    rescue StandardError => e
+      raise FlacInfoReadError, "Could not parse METADATA_BLOCK_PICTURE: #{e.message}"
+    end
+  end
+end
+
+# This block is for use by third-party applications. The only mandatory field is a 32-bit identifier. This ID is granted
+# upon request to an application by the FLAC maintainers. The remainder is of the block is defined by the registered
+# application. The registered applications are listed on the registration page:
+# https://www.iana.org/assignments/flac/flac.xhtml
+class Application < Block
+  attr_reader :id, :name, :raw_data, :flac_file
+
+  FIELDS = %w[block_size offset id name raw_data flac_file].freeze
+  BLOCK_NAME = 'APPLICATION'
+
+  APP_ID = {
+    '41544348' => 'FlacFile',
+    '42534F4C' => 'beSolo',
+    '42554753' => 'Bugs Player',
+    '43756573' => 'GoldWave cue points',
+    '46696361' => 'CUE Splitter',
+    '46746F6C' => 'flac-tools',
+    '4D4F5442' => 'MOTB MetaCzar',
+    '4D505345' => 'MP3 Stream Editor',
+    '4D754D4C' => 'MusicML: Music Metadata Language',
+    '52494646' => 'Sound Devices RIFF chunk storage',
+    '5346464C' => 'Sound Font FLAC',
+    '534F4E59' => 'Sony Creative Software',
+    '5351455A' => 'flacsqueeze',
+    '54745776' => 'TwistedWave',
+    '55495453' => 'UITS Embedding tools',
+    '61696666' => 'FLAC AIFF chunk storage',
+    '696D6167' => 'flac-image',
+    '7065656D' => 'Parseable Embedded Extensible Metadata',
+    '71667374' => 'QFLAC Studio',
+    '72696666' => 'FLAC RIFF chunk storage',
+    '74756E65' => 'TagTuner',
+    '77363420' => 'FLAC Wave64 chunk storage',
+    '78626174' => 'XBAT',
+    '786D6364' => 'xmcd'
+  }.freeze
+
+  def initialize(io, header)
+    super(header)
+    @io = io
+    parse_application
+  end
+
+  private
+
+  # See http://firestuff.org/flacfile/
+  def parse_flac_file_contents(size)
+    @flac_file = {}
+    desc_length = @io.read(1).unpack1('C')
+    @flac_file['description'] = @io.read(desc_length)
+    mime_length = @io.read(1).reverse.unpack1('C')
+    @flac_file['mime_type'] = @io.read(mime_length)
+    size = size - 2 - desc_length - mime_length
+    @flac_file['raw_data'] = @io.read(size)
+  rescue StandardError => e
+    raise FlacInfoReadError, "Could not parse Flac File data: #{e.message}"
+  end
+
+  def parse_application
+    @id = @io.read(4).unpack1('H*')
+    @name = APP_ID[@id].to_s
+
+    #  We only know how to parse data from 'Flac File'...
+    if @id == '41544348'
+      parse_flac_file_contents(@block_size - 4)
+    else
+      @raw_data = @io.read(@block_size - 4)
+    end
+  rescue StandardError => e
+    raise FlacInfoReadError, "Could not parse METADATA_BLOCK_APPLICATION: #{e.message}"
+  end
+end
+
+# This block is for storing a list of human-readable name/value pairs. Values are encoded using UTF-8. It is an
+# implementation of the Vorbis comment specification (without the framing bit). This is the only officially supported
+# tagging mechanism in FLAC. There may be only one VORBIS_COMMENT block in a stream. In some external documentation,
+# Vorbis comments are called FLAC tags to lessen confusion.
+class VorbisComment < Block
+  attr_reader :tags, :comment
+
+  BLOCK_NAME = 'VORBIS_COMMENT'
+
+  def initialize(io, header)
+    super(header)
+    @io = io
+    @tags = {}
+    @comment = []
+    @tags['block_size'] = @block_size
+    @tags['offset'] = @offset
+
+    parse_vorbis_comments
+  end
+
+  def [](key)
+    @tags[key]
+  end
+
+  def each_pair(&block)
+    @tags.each_pair(&block)
+  end
+
+  def keys
+    @tags.keys
+  end
+
+  def to_h
+    @tags.dup
+  end
+
+  private
+
+  def split_comments
+    @comment.each do |c|
+      k, v = c.split('=', 2)
+      #  Vorbis spec says we can have more than one identical comment ie:
+      #  comment[0]="Artist=Charlie Parker"
+      #  comment[1]="Artist=Miles Davis"
+      #  so we just append the second and subsequent values to the first
+      @tags[k] = if @tags.key?(k)
+                   "#{@tags[k]}, #{v}"
+                 else
+                   v
+                 end
+    end
+  end
+
+  def parse_vorbis_comments
+    vendor_length = @io.read(4).unpack1('L<')
+    @tags['vendor_tag'] = @io.read(vendor_length)
+
+    user_comment_list_length = @io.read(4).unpack1('L<')
+    n = 0
+    user_comment_list_length.times do
+      length = @io.read(4).unpack1('L<')
+      @comment[n] = @io.read(length)
+      n += 1
+    end
+
+    split_comments
+
+  rescue StandardError => e
+    raise FlacInfoReadError, "Could not parse METADATA_BLOCK_VORBIS_COMMENT: #{e.message}"
+  end
+end
+
+# 'Unknown' blocks are present when a METADATA_BLOCK has type 7-126, which are reserved for future use as per the spec.
+# The presence of one of these types likely indicates an invalid block, but we present it as unknown to be future-proof,
+# that is, the spec recommends ignoring blocks we don't understand.
+class Unknown < Block
+  def initialize(io, header)
+    super(header)
+    @io = io
+  end
+end
+
+BLOCK_TYPES = {
+  0 => Streaminfo,
+  1 => Padding,
+  2 => Application,
+  3 => Seektable,
+  4 => VorbisComment,
+  5 => Cuesheet,
+  6 => Picture
+}.freeze
+
 # STREAMINFO is the only block guaranteed to be present in the Flac file.
 # All attributes will be present but empty if the associated block is not present in the Flac file,
 # except for 'picture' which will have the key 'n' with the value '0'.
@@ -53,87 +574,109 @@ FlacInfoWriteError = Class.new(StandardError)
 # no matter the type, so if you need the offset including the header, subtract 4. If you need the size
 # including the header, add 4.
 class FlacInfo
-  # A list of 'standard field names' according to the Vorbis Comment specification. It is certainly
-  # possible to use a non-standard name, but the spec recommends against it.
-  # See: http://www.xiph.org/vorbis/doc/v-comment.html
-  STANDARD_FIELD_NAMES = %w[TITLE VERSION ALBUM TRACKNUMBER ARTIST PERFORMER COPYRIGHT LICENSE
-                            ORGANIZATION DESCRIPTION GENRE DATE LOCATION CONTACT ISRC].freeze
-
   # Hash of values extracted from the STREAMINFO block. Keys are:
-  # 'offset':: The STREAMINFO block's offset from the beginning of the file (not including the block header).
-  # 'block_size':: The size of the STREAMINFO block (not including the block header).
-  # 'minimum_block':: The minimum block size (in samples) used in the stream.
-  # 'maximum_block':: The maximum block size (in samples) used in the stream.
-  # 'minimum_frame':: The minimum frame size (in bytes) used in the stream.
-  # 'maximum_frame':: The maximum frame size (in bytes) used in the stream.
-  # 'samplerate':: Sample rate in Hz.
-  # 'channels':: The number of channels used in the stream.
-  # 'bits_per_sample':: The number of bits per sample used in the stream.
-  # 'total_samples':: The total number of samples in stream.
-  # 'md5':: MD5 signature of the unencoded audio data.
-  attr_reader :streaminfo
+  # 'offset'- The STREAMINFO block's offset from the beginning of the file (not including the block header).
+  # 'block_size'- The size of the STREAMINFO block (not including the block header).
+  # 'minimum_block'- The minimum block size (in samples) used in the stream.
+  # 'maximum_block'- The maximum block size (in samples) used in the stream.
+  # 'minimum_frame'- The minimum frame size (in bytes) used in the stream.
+  # 'maximum_frame'- The maximum frame size (in bytes) used in the stream.
+  # 'samplerate'- Sample rate in Hz.
+  # 'channels'- The number of channels used in the stream.
+  # 'bits_per_sample'- The number of bits per sample used in the stream.
+  # 'total_samples'- The total number of samples in stream.
+  # 'md5'- MD5 signature of the unencoded audio data.
+  def streaminfo
+    @flac.streaminfo
+  end
 
   # Hash of values extracted from the SEEKTABLE block. Keys are:
-  # 'offset':: The SEEKTABLE block's offset from the beginning of the file (not including the block header).
-  # 'block_size':: The size of the SEEKTABLE block (not including the block header).
-  # 'seek_points':: The number of seek points in the block.
-  # 'points':: Another hash whose keys start at 0 and end at ('seek_points' - 1). Each "seektable['points'][n]" hash
+  # 'offset'- The SEEKTABLE block's offset from the beginning of the file (not including the block header).
+  # 'block_size'- The size of the SEEKTABLE block (not including the block header).
+  # 'seek_points'- The number of seek points in the block.
+  # 'points'- Another hash whose keys start at 0 and end at ('seek_points' - 1). Each "seektable['points'][n]" hash
   #            contains an array whose (integer) values are:
-  #            '0':: Sample number of first sample in the target frame, or 0xFFFFFFFFFFFFFFFF for a placeholder point.
-  #            '1':: Offset (in bytes) from the first byte of the first frame header to the first byte of the target frame's header.
-  #            '2':: Number of samples in the target frame.
-  attr_reader :seektable
+  #            '0'- Sample number of first sample in the target frame, or 0xFFFFFFFFFFFFFFFF for a placeholder point.
+  #            '1'- Offset (in bytes) from the first byte of the first frame header to the first byte of the target
+  #                  frame's header.
+  #            '2'- Number of samples in the target frame.
+  def seektable
+    @flac.seektable
+  end
 
-  # Array of "name=value" strings extracted from the VORBIS_COMMENT block. This is just the contents, metadata is in 'tags'.
-  # You should not normally operate on this array directly. Rather, use the comment_add and comment_del methods to make changes.
-  attr_accessor :comment
+  # Array of "name=value" strings extracted from the VORBIS_COMMENT block. This is just the contents, metadata is in
+  # 'tags'. You should not normally operate on this array directly. Rather, use the comment_add and comment_del methods
+  # to make changes.
+  def comment
+    @flac.vorbis_comment.comment
+  end
 
   # Hash of the 'comment' values separated into "key => value" pairs as well as the keys:
-  # 'offset':: The VORBIS_COMMENT block's offset from the beginning of the file (not including the block header).
-  # 'block_size':: The size of the VORBIS_COMMENT block (not including the block header).
-  # 'vendor_tag':: Typically, the name and version of the software that encoded the file.
-  attr_reader :tags
+  # 'offset'- The VORBIS_COMMENT block's offset from the beginning of the file (not including the block header).
+  # 'block_size'- The size of the VORBIS_COMMENT block (not including the block header).
+  # 'vendor_tag'- Typically, the name and version of the software that encoded the file.
+  def tags
+    @flac.vorbis_comment.tags
+  end
 
   # Hash of values extracted from the APPLICATION block. Keys are:
-  # 'offset':: The APPLICATION block's offset from the beginning of the file (not including the block header).
-  # 'block_size':: The size of the APPLICATION block (not including the block header).
-  # 'ID':: Registered application ID. See http://flac.sourceforge.net/id.html
-  # 'name':: Name of the registered application ID.
-  attr_reader :application
+  # 'offset'- The APPLICATION block's offset from the beginning of the file (not including the block header).
+  # 'block_size'- The size of the APPLICATION block (not including the block header).
+  # 'ID'- Registered application ID. See http://flac.sourceforge.net/id.html
+  # 'name'- Name of the registered application ID.
+  def application
+    @flac.application
+  end
+
+  def applications
+    @flac.applications
+  end
 
   # Hash of values extracted from the PADDING block. Keys are:
-  # 'offset':: The PADDING block's offset from the beginning of the file (not including the block header).
-  # 'block_size':: The size of the PADDING block (not including the block header).
-  attr_reader :padding
+  # 'offset'- The PADDING block's offset from the beginning of the file (not including the block header).
+  # 'block_size'- The size of the PADDING block (not including the block header).
+  def padding
+    @flac.padding
+  end
 
   # Hash of values extracted from the CUESHEET block. Keys are:
-  # 'offset':: The CUESHEET block's offset from the beginning of the file (not including the block header).
-  # 'block_size':: The size of the CUESHEET block (not including the block header).
-  attr_reader :cuesheet
+  # 'offset'- The CUESHEET block's offset from the beginning of the file (not including the block header).
+  # 'block_size'- The size of the CUESHEET block (not including the block header).
+  def cuesheet
+    @flac.cuesheet
+  end
 
-  # Hash of values extracted from one or more PICTURE blocks. This hash always includes the key 'n' which is the number of
-  # PICTURE blocks found, else '0'. For each block found there will be an integer key starting from 1. Each of these is a
-  # hash which contains the keys:
-  # 'offset':: The PICTURE block's offset from the beginning of the file (not including the block header).
-  # 'block_size':: The size of the PICTURE block (not including the block header).
-  # 'type_int':: The picture type according to the ID3v2 APIC frame.
-  # 'type_string':: A text value representing the picture type.
-  # 'description_string':: A text description of the picture.
-  # 'mime_type':: The MIME type string. May be '-->' to signify that the data part is a URL of the picture.
-  # 'colour_depth':: The colour depth of the picture in bits-per-pixel.
-  # 'n_colours':: For indexed-colour pictures (e.g. GIF), the number of colours used, or 0 for non-indexed pictures.
-  # 'width':: The width of the picture in pixels.
-  # 'height':: The height of the picture in pixels.
-  # 'raw_data_offset':: The raw picture data's offset from the beginning of the file.
-  # 'raw_data_length':: The length of the picture data in bytes.
-  attr_reader :picture
+  # Hash of values extracted from one or more PICTURE blocks. This hash always includes the key 'n' which is the number
+  # of PICTURE blocks found, else '0'. For each block found there will be an integer key starting from 1. Each of these
+  # is a hash which contains the keys:
+  # 'offset'- The PICTURE block's offset from the beginning of the file (not including the block header).
+  # 'block_size'- The size of the PICTURE block (not including the block header).
+  # 'type_int'- The picture type according to the ID3v2 APIC frame.
+  # 'type_string'- A text value representing the picture type.
+  # 'description_string'- A text description of the picture.
+  # 'mime_type'- The MIME type string. May be '-->' to signify that the data part is a URL of the picture.
+  # 'colour_depth'- The colour depth of the picture in bits-per-pixel.
+  # 'n_colours'- For indexed-colour pictures (e.g. GIF), the number of colours used, or 0 for non-indexed pictures.
+  # 'width'- The width of the picture in pixels.
+  # 'height'- The height of the picture in pixels.
+  # 'raw_data_offset'- The raw picture data's offset from the beginning of the file.
+  # 'raw_data_length'- The length of the picture data in bytes.
+  def picture
+    @flac.picture
+  end
+
+  def pictures
+    @flac.pictures
+  end
 
   # Hash of values extracted from an APPLICATION block if it is type 0x41544348 (Flac File).
   # Keys are:
-  # 'description':: A brief text description of the contents.
-  # 'mime_type':: The Mime type of the contents.
-  # 'raw_data':: The contents. May be binary.
-  attr_reader :flac_file
+  # 'description'- A brief text description of the contents.
+  # 'mime_type'- The Mime type of the contents.
+  # 'raw_data'- The contents. May be binary.
+  def flac_file
+    @flac.flac_file
+  end
 
   # FlacInfo is the class for parsing Flac files.
   #
@@ -151,7 +694,7 @@ class FlacInfo
   #   FlacInfo.hastag?(tag)   -> bool
   #
   def hastag?(tag)
-    @tags[tag.to_s] ? true : false
+    @flac.vorbis_comment[tag] ? true : false
   end
 
   # Pretty print tags hash.
@@ -164,7 +707,7 @@ class FlacInfo
   def print_tags
     raise FlacInfoError, 'METADATA_BLOCK_VORBIS_COMMENT not present' if @tags == {}
 
-    @tags.each_pair { |key, val| puts "#{key}: #{val}" }
+    @flac.vorbis_comment.each_pair { |key, val| puts "#{key}: #{val}" }
     nil
   end
 
@@ -175,7 +718,7 @@ class FlacInfo
   #
   def print_streaminfo
     #  No test: METADATA_BLOCK_STREAMINFO must be present in valid Flac file
-    @streaminfo.each_pair { |key, val| puts "#{key}: #{val}" }
+    @flac.streaminfo.each_pair { |key, val| puts "#{key}: #{val}" }
     nil
   end
 
@@ -189,12 +732,13 @@ class FlacInfo
   def print_seektable
     raise FlacInfoError, 'METADATA_BLOCK_SEEKTABLE not present' if @seektable == {}
 
-    puts "  seek points: #{@seektable['seek_points']}"
+    puts "  seek points: #{@flac.seektable.seek_points}"
     n = 0
-    @seektable['seek_points'].times do
-      print "    point #{n}: sample number: #{@seektable['points'][n][0]}, "
-      print "stream offset: #{@seektable['points'][n][1]}, "
-      print "frame samples: #{@seektable['points'][n][2]}\n"
+    points = @flac.seektable.points
+    @flac.seektable.seek_points.times do
+      print "    point #{n}: sample number: #{points[n][0]}, "
+      print "stream offset: #{points[n][1]}, "
+      print "frame samples: #{points[n][2]}\n"
       n += 1
     end
     nil
@@ -420,11 +964,11 @@ class FlacInfo
   #--
   #  This cleans up the output when using FlacInfo in irb
   def inspect # :nodoc:
-    s = "#<#{self.class}:0x#{(object_id * 2).to_s(16)} "
-    @metadata_blocks.each do |blk|
-      s += "(#{blk[0].upcase} size=#{blk[4]} offset=#{blk[3]}) "
-    end
-    "#{s}\b>"
+    blocks = @flac.blocks.map do |blk|
+      "(#{blk.class::BLOCK_NAME} size=#{blk.block_size} offset=#{blk.offset})"
+    end.join(' ')
+
+    "#<#{self.class}:0x#{(object_id * 2).to_s(16)} #{blocks}>"
   end
   #++
 
@@ -500,253 +1044,10 @@ class FlacInfo
     puts "  image size: #{@picture[n]['raw_data_length']} bytes"
   end
 
-
   #  This is where the 'real' parsing starts
   def parse_flac_meta_blocks
-    @fp = File.new(@filename, 'rb') #  Our file pointer
     @comments_changed = nil #  Do we need to write a new VORBIS_BLOCK?
-
-    #  These next 8 lines initialize our public data structures.
-    @streaminfo  = {}
-    @comment     = []
-    @tags        = {}
-    @seektable   = {}
-    @padding     = {}
-    @application = {}
-    @cuesheet    = {}
-    @picture     = { 'n' => 0 }
-
-    header = @fp.read(4)
-    #  First 4 bytes must be 0x66, 0x4C, 0x61, and 0x43
-    raise FlacInfoReadError, "#{@filename} does not appear to be a valid Flac file" if header != 'fLaC'
-
-    type_table = { 0 => 'streaminfo', 1 => 'padding', 2 => 'application',
-                   3 => 'seektable', 4 => 'vorbis_comment', 5 => 'cuesheet',
-                   6 => 'picture' }
-
-    @metadata_blocks = []
-    last_header = 0
-
-    until last_header == 1
-      #  first bit = Last-metadata-block flag
-      #  bits 2-8 = BLOCK_TYPE. See type_table above
-      block_header = @fp.read(1).unpack1('B*')
-      last_header = block_header[0].to_i & 1
-      type = format('%u', "0b#{block_header[1..7]}").to_i
-      @metadata_blocks << [type_table[type], type, last_header]
-
-      raise FlacInfoReadError, 'Invalid block header type' if type >= type_table.size
-
-      send "parse_#{type_table[type]}"
-    end
-
-    @fp.close
-    p @metadata_blocks
-  end
-
-  def parse_seektable
-
-    @seektable['block_size'] = @fp.read(3).unpack1('B*').to_i(2)
-    @seektable['offset'] = @fp.tell
-    @seektable['seek_points'] = @seektable['block_size'] / 18
-
-    @metadata_blocks[-1] << @seektable['offset']
-    @metadata_blocks[-1] << @seektable['block_size']
-
-    n = 0
-    @seektable['points'] = {}
-
-    @seektable['seek_points'].times do
-      pt_arr = []
-      pt_arr << @fp.read(8).reverse.unpack1('V*')
-      pt_arr << @fp.read(8).reverse.unpack1('V*')
-      pt_arr << @fp.read(2).reverse.unpack1('v*')
-      @seektable['points'][n] = pt_arr
-      n += 1
-    end
-
-  rescue StandardError => e
-    raise FlacInfoReadError, "Could not parse METADATA_BLOCK_SEEKTABLE: #{e.message}"
-  end
-
-  #  TODO: I finally found a flac file with a cuesheet!
-  def parse_cuesheet
-
-    @cuesheet['block_size'] = @fp.read(3).unpack1('B*').to_i(2)
-    @cuesheet['offset'] = @fp.tell
-
-    @metadata_blocks[-1] << @cuesheet['offset']
-    @metadata_blocks[-1] << @cuesheet['block_size']
-
-    @fp.seek(@cuesheet['block_size'], IO::SEEK_CUR)
-  rescue StandardError => e
-    raise FlacInfoReadError, "Could not parse METADATA_BLOCK_CUESHEET: #{e.message}"
-  end
-
-  def parse_picture
-    n = @picture['n'] + 1
-    @picture['n'] = n
-    @picture[n]   = {}
-
-    picture_type = ['Other', '32x32 pixels file icon', 'Other file icon', 'Cover (front)', 'Cover (back)',
-                    'Leaflet page', 'Media', 'Lead artist/lead performer/soloist', 'Artist/performer',
-                    'Conductor', 'Band/Orchestra', 'Composer', 'Lyricist/text writer', 'Recording Location',
-                    'During recording', 'During performance', 'Movie/video screen capture', "A bright
-                     coloured fish", 'Illustration', 'Band/artist logotype', 'Publisher/Studio logotype']
-
-    begin
-      @picture[n]['block_size'] = @fp.read(3).unpack1('B*').to_i(2)
-      @picture[n]['offset'] = @fp.tell
-
-      @metadata_blocks[-1] << @picture[n]['offset']
-
-      @picture[n]['type_int']           = @fp.read(4).reverse.unpack1('v*')
-      @picture[n]['type_string']        = picture_type[@picture[n]['type_int']]
-      mime_length                       = @fp.read(4).reverse.unpack1('v*')
-      @picture[n]['mime_type']          = @fp.read(mime_length).unpack1('a*')
-      description_length                = @fp.read(4).reverse.unpack1('v*')
-      @picture[n]['description_string'] = @fp.read(description_length).unpack1('M*')
-      @picture[n]['width']              = @fp.read(4).reverse.unpack1('v*')
-      @picture[n]['height']             = @fp.read(4).reverse.unpack1('v*')
-      @picture[n]['colour_depth']       = @fp.read(4).reverse.unpack1('v*')
-      @picture[n]['n_colours']          = @fp.read(4).reverse.unpack1('v*')
-      @picture[n]['raw_data_length']    = @fp.read(4).reverse.unpack1('V*')
-      @picture[n]['raw_data_offset']    = @fp.tell
-
-      @metadata_blocks[-1] << @picture[n]['block_size']
-
-      @fp.seek(@picture[n]['raw_data_length'], IO::SEEK_CUR)
-    rescue StandardError => e
-      raise FlacInfoReadError, "Could not parse METADATA_BLOCK_PICTURE: #{e.message}"
-    end
-  end
-
-  def parse_application
-    @application['block_size'] = @fp.read(3).unpack1('B*').to_i(2)
-    @application['offset'] = @fp.tell
-
-    @metadata_blocks[-1] << @application['offset']
-    @metadata_blocks[-1] << @application['block_size']
-
-    @application['ID'] = @fp.read(4).unpack1('H*')
-
-    app_id = { '41544348' => 'Flac File', '43756573' => 'GoldWave Cue Points',
-               '4D754D4C' => 'MusicML', '46696361' => 'CUE Splitter',
-               '46746F6C' => 'flac-tools', '5346464C' => 'Sound Font FLAC',
-               '7065656D' => 'Parseable Embedded Extensible Metadata', '74756E65' => 'TagTuner',
-               '786D6364' => 'xmcd' }
-
-    @application['name'] = app_id[@application['ID']].to_s
-
-    #  We only know how to parse data from 'Flac File'...
-    if @application['ID'] == '41544348'
-      parse_flac_file_contents(@application['block_size'] - 4)
-    else
-      @application['raw_data'] = @fp.read(@application['block_size'] - 4)
-    end
-  rescue StandardError => e
-    raise FlacInfoReadError, "Could not parse METADATA_BLOCK_APPLICATION: #{e.message}"
-  end
-
-  #  Unlike most values in the Flac header
-  #  the Vorbis comments are in LSB order
-  #
-  #  @comment is an array of values according to the official spec implementation
-  #  @tags is a more user-friendly data structure with the values
-  #  separated into key=value pairs
-  def parse_vorbis_comment
-    @tags['block_size'] = @fp.read(3).unpack1('B*').to_i(2)
-    @tags['offset']     = @fp.tell
-
-    @metadata_blocks[-1] << @tags['offset']
-    @metadata_blocks[-1] << @tags['block_size']
-
-    vendor_length = @fp.read(4).reverse.unpack1('B*').to_i(2)
-
-    @tags['vendor_tag'] = @fp.read(vendor_length)
-    user_comment_list_length = @fp.read(4).reverse.unpack1('B*').to_i(2)
-
-    n = 0
-    user_comment_list_length.times do
-      length = @fp.read(4).reverse.unpack1('B*').to_i(2)
-      @comment[n] = @fp.read(length)
-      n += 1
-    end
-
-    @comment.each do |c|
-      k, v = c.split('=', 2)
-      #  Vorbis spec says we can have more than one identical comment ie:
-      #  comment[0]="Artist=Charlie Parker"
-      #  comment[1]="Artist=Miles Davis"
-      #  so we just append the second and subsequent values to the first
-      @tags[k] = if @tags.key?(k)
-                   "#{@tags[k]}, #{v}"
-                 else
-                   v
-                 end
-    end
-
-  rescue StandardError => e
-    raise FlacInfoReadError, "Could not parse METADATA_BLOCK_VORBIS_COMMENT: #{e.message}"
-  end
-
-  # padding is just a bunch of '0' bytes
-  def parse_padding
-    @padding['block_size'] = @fp.read(3).unpack1('B*').to_i(2)
-    @padding['offset'] = @fp.tell
-
-    @metadata_blocks[-1] << @padding['offset']
-    @metadata_blocks[-1] << @padding['block_size']
-
-    @fp.seek(@padding['block_size'], IO::SEEK_CUR)
-  rescue StandardError => e
-    raise FlacInfoReadError, "Could not parse METADATA_BLOCK_PADDING: #{e.message}"
-  end
-
-  def parse_streaminfo
-    @streaminfo['block_size'] = @fp.read(3).unpack1('B*').to_i(2)
-    @streaminfo['offset'] = @fp.tell
-
-    @metadata_blocks[-1] << @streaminfo['offset']
-    @metadata_blocks[-1] << @streaminfo['block_size']
-
-    @streaminfo['minimum_block'] = @fp.read(2).reverse.unpack1('v*')
-    @streaminfo['maximum_block'] = @fp.read(2).reverse.unpack1('v*')
-    @streaminfo['minimum_frame'] = @fp.read(3).reverse.unpack1('v*')
-    @streaminfo['maximum_frame'] = @fp.read(3).reverse.unpack1('v*')
-
-    #  64 bits in MSB order
-    bitstring = @fp.read(8).unpack1('B*')
-
-    #  20 bits :: Sample rate in Hz.
-    @streaminfo['samplerate'] = format('%u', "0b#{bitstring[0..19]}").to_i
-
-    #  3 bits :: (number of channels)-1
-    @streaminfo['channels'] = format('%u', "0b#{bitstring[20..22]}").to_i + 1
-
-    #  5 bits :: (bits per sample)-1
-    @streaminfo['bits_per_sample'] = format('%u', "0b#{bitstring[23..27]}").to_i + 1
-
-    #  36 bits :: Total samples in stream.
-    @streaminfo['total_samples'] = format('%u', "0b#{bitstring[28..63]}").to_i
-
-    #  128 bits :: MD5 signature of the unencoded audio data.
-    @streaminfo['md5'] = @fp.read(16).unpack1('H32')
-  rescue StandardError => e
-    raise FlacInfoReadError, "Could not parse METADATA_BLOCK_STREAMINFO: #{e.message}"
-  end
-
-  #  See http://firestuff.org/flacfile/
-  def parse_flac_file_contents(size)
-    @flac_file = {}
-    desc_length = @fp.read(1).unpack1('C')
-    @flac_file['description'] = @fp.read(desc_length)
-    mime_length = @fp.read(1).reverse.unpack1('C')
-    @flac_file['mime_type'] = @fp.read(mime_length)
-    size = size - 2 - desc_length - mime_length
-    @flac_file['raw_data'] = @fp.read(size)
-  rescue StandardError => e
-    raise FlacInfoReadError, "Could not parse Flac File data: #{e.message}"
+    @flac = Stream.new(@filename)
   end
 
   #  Here we begin the FlacInfo write methods
