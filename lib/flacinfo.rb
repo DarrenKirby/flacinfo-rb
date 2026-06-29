@@ -168,6 +168,14 @@ class Block
     @is_last    = header.is_last
   end
 
+  def block_name
+    self.class::BLOCK_NAME
+  end
+
+  def fields
+    self.class::FIELDS
+  end
+
   def each
     self.class::FIELDS.each do |field|
       yield field, public_send(field)
@@ -186,27 +194,13 @@ class Block
     raise FlacInfoError, "No such key: #{key}"
   end
 
-  # def [](key)
-  #   public_send(key)
-  # rescue NoMethodError
-  #   raise FlacInfoError, "No such key: #{key}"
-  # end
-  #
-  # def each_pair
-  #   self.class::FIELDS.each do |field|
-  #     yield field, public_send(field)
-  #   end
-  # end
-  #
-  # def keys
-  #   self.class::FIELDS
-  # end
-  #
-  # def to_h
-  #   self.class::FIELDS.to_h do |field|
-  #     [field, public_send(field)]
-  #   end
-  # end
+  def inspect
+    attrs = self.class::FIELDS.map do |field|
+      "#{field}=#{self[field].inspect}"
+    end.join(', ')
+
+    "#<#{self.class} #{attrs}>"
+  end
 end
 
 # This block has information about the whole stream, like sample rate, number of channels, total number of samples, etc.
@@ -380,25 +374,22 @@ class Picture < Block
   private
 
   def parse_picture
-    begin
-      # The picture type according to the ID3v2 APIC frame
-      @type_int           = @io.read(4).reverse.unpack1('v*')
-      @type_string        = PICTURE_TYPE[@type_int]
-      mime_length         = @io.read(4).reverse.unpack1('v*')
-      @mime_type          = @io.read(mime_length).unpack1('a*')
-      description_length  = @io.read(4).reverse.unpack1('v*')
-      @description_string = @io.read(description_length).unpack1('M*')
-      @width              = @io.read(4).reverse.unpack1('v*')
-      @height             = @io.read(4).reverse.unpack1('v*')
-      @colour_depth       = @io.read(4).reverse.unpack1('v*')
-      @n_colours          = @io.read(4).reverse.unpack1('v*')
-      @raw_data_length    = @io.read(4).reverse.unpack1('V*')
-      @raw_data_offset    = @io.tell
-      # Fast-forward over the picture data to the next block header.
-      @io.seek(@raw_data_length, IO::SEEK_CUR)
-    rescue StandardError => e
-      raise FlacInfoReadError, "Could not parse METADATA_BLOCK_PICTURE: #{e.message}"
-    end
+    @type_int           = @io.read(4).unpack1('L>')
+    @type_string        = PICTURE_TYPE[@type_int]
+    mime_length         = @io.read(4).unpack1('L>')
+    @mime_type          = @io.read(mime_length)
+    description_length  = @io.read(4).unpack1('L>')
+    @description_string = @io.read(description_length)
+    @width              = @io.read(4).unpack1('L>')
+    @height             = @io.read(4).unpack1('L>')
+    @colour_depth       = @io.read(4).unpack1('L>')
+    @n_colours          = @io.read(4).unpack1('L>')
+    @raw_data_length    = @io.read(4).unpack1('L>')
+    @raw_data_offset    = @io.tell
+    # Fast-forward over the picture data to the next block header.
+    @io.seek(@raw_data_length, IO::SEEK_CUR)
+  rescue StandardError => e
+    raise FlacInfoReadError, "Could not parse METADATA_BLOCK_PICTURE: #{e.message}"
   end
 end
 
@@ -483,6 +474,7 @@ class VorbisComment < Block
   attr_reader :tags, :comment
 
   BLOCK_NAME = 'VORBIS_COMMENT'
+  FIELDS = %w[offset block_size comment tags].freeze
 
   def initialize(io, header)
     super(header)
@@ -566,6 +558,127 @@ BLOCK_TYPES = {
   5 => Cuesheet,
   6 => Picture
 }.freeze
+
+class MetaFlacPrinter
+  attr_reader :flac, :io
+
+  def initialize(flac, io)
+    @flac = flac
+    @io = io
+  end
+
+  def print
+    n = 0
+    @flac.blocks.each do |block|
+      @block = block
+
+      @io.puts "METADATA block ##{n}"
+      @io.puts "  type: #{@block.type} (#{@block.block_name})"
+      @io.puts "  is last: #{@block.is_last.zero? ? 'false' : 'true'}"
+
+      case block.type
+      when 0
+        meta_stream
+      when 1
+        meta_pad
+      when 2
+        meta_app
+      when 3
+        meta_seek
+      when 4
+        meta_vorb
+      when 5
+        meta_cue
+      when 6
+        meta_pict
+      else
+        @io.puts "  length: #{@block.block_size}"
+      end
+    end
+    nil
+  end
+
+  private
+
+  def meta_stream
+    @io.puts "  length: #{@block.block_size}"
+    @io.puts "  minimum blocksize: #{@block.minimum_block} samples"
+    @io.puts "  maximum blocksize: #{@block.maximum_block} samples"
+    @io.puts "  minimum framesize: #{@block.minimum_frame} bytes"
+    @io.puts "  maximum framesize: #{@block.maximum_frame} bytes"
+    @io.puts "  sample rate: #{@block.samplerate} Hz"
+    @io.puts "  channels: #{@block.channels}"
+    @io.puts "  bits-per-sample: #{@block.bits_per_sample}"
+    @io.puts "  total samples: #{@block.total_samples}"
+    @io.puts "  MD5 signature: #{@block.md5}"
+  end
+
+  def meta_pad
+    @io.puts "  length: #{@block.block_size}"
+  end
+
+  def meta_app
+    # TODO: this needs to be fixed once I can get a flac with
+    # an application block.
+    @io.puts "  length: #{@application['block_size']}"
+    @io.puts "  id: #{@application['ID']}"
+    @io.puts "  application name: #{@application['name']}"
+    if @application['ID'] == '41544348'
+      @io.puts "    description: #{@flac_file['description']}"
+      @io.puts "    mime type: #{@flac_file['mime_type']}"
+      #  Don't want to dump binary data
+      if @flac_file['mime_type'] =~ /text/
+        @io.puts '    raw data:'
+        @io.puts @flac_file['raw_data']
+      else
+        @io.puts "'Flac File' data may be binary. Use 'raw_data_dump' to see it"
+      end
+    else
+      @io.puts '    raw data'
+      @io.puts @application['raw_data']
+    end
+  end
+
+  def meta_seek
+    @io.puts "  length: #{@block.block_size}"
+    @io.puts "  seek points: #{@block.seek_points}"
+    n = 0
+    points = @block.points
+    @block.seek_points.times do
+      @io.print "    point #{n}: sample number: #{points[n][0]}, "
+      @io.print "stream offset: #{points[n][1]}, "
+      @io.print "frame samples: #{points[n][2]}\n"
+      n += 1
+    end
+  end
+
+  def meta_vorb
+    @io.puts "  length: #{@block.block_size}"
+    @io.puts "  vendor string: #{@block.tags['vendor_tag']}"
+    @io.puts "  comments: #{@block.comment.size}"
+    n = 0
+    @block.comment.each do |v|
+      @io.puts "    comment[#{n}]: #{v}"
+      n += 1
+    end
+  end
+
+  def meta_cue
+    @io.puts "  length: #{@block.block_size}"
+  end
+
+  def meta_pict
+    @io.puts "  length: #{@block.block_size}"
+    @io.puts "  type: #{@block.type_int} => #{@block.type_string}"
+    @io.puts "  mimetype: #{@block.mime_type}"
+    @io.puts "  description: #{@block.description_string}"
+    @io.puts "  image width: #{@block.width}"
+    @io.puts "  image height: #{@block.height}"
+    @io.puts "  colour depth: #{@block.colour_depth}"
+    @io.puts "  number of colours: #{@block.n_colours}"
+    @io.puts "  image size: #{@block.raw_data_length} bytes"
+  end
+end
 
 # STREAMINFO is the only block guaranteed to be present in the Flac file.
 # All attributes will be present but empty if the associated block is not present in the Flac file,
@@ -748,37 +861,14 @@ class FlacInfo
   #
   # :call-seq:
   #   FlacInfo.meta_flac ->   nil
-  #
-  def meta_flac
-    n = 0
-    pictures_seen = 0
-    @metadata_blocks.each do |block|
-      puts "METADATA block ##{n}"
-      puts "  type: #{block[1]} (#{block[0].upcase})"
-      puts "  is last: #{block[2].zero? ? 'false' : 'true'}"
-      case block[1]
-      when 0
-        meta_stream
-      when 1
-        meta_pad
-      when 2
-        meta_app
-      when 3
-        meta_seek
-      when 4
-        meta_vorb
-      when 5
-        meta_cue
-      when 6
-        pictures_seen += 1
-        meta_pict(pictures_seen)
-      else
-        # This will never run ... file already parsed.
-        raise FlacInfoError, 'Unknown metadata blocktype found'
+  def meta_flac(target = $stdout)
+    if target.is_a?(String)
+      File.open(target, 'w') do |f|
+        MetaFlacPrinter.new(@flac, f).print
       end
-      n += 1
+    else
+      MetaFlacPrinter.new(@flac, target).print
     end
-    nil
   end
 
   # Dumps the contents of flac_file['raw_data']
@@ -974,75 +1064,6 @@ class FlacInfo
 
   private
 
-  #  The following six methods are just helpers for meta_flac
-  def meta_stream
-    puts "  length: #{@streaminfo['block_size']}"
-    puts "  minimum blocksize: #{@streaminfo['minimum_block']} samples"
-    puts "  maximum blocksize: #{@streaminfo['maximum_block']} samples"
-    puts "  minimum framesize: #{@streaminfo['minimum_frame']} bytes"
-    puts "  maximum framesize: #{@streaminfo['maximum_frame']} bytes"
-    puts "  sample rate: #{@streaminfo['samplerate']} Hz"
-    puts "  channels: #{@streaminfo['channels']}"
-    puts "  bits-per-sample: #{@streaminfo['bits_per_sample']}"
-    puts "  total samples: #{@streaminfo['total_samples']}"
-    puts "  MD5 signature: #{@streaminfo['md5']}"
-  end
-
-  def meta_pad
-    puts "  length: #{@padding['block_size']}"
-  end
-
-  def meta_app
-    puts "  length: #{@application['block_size']}"
-    puts "  id: #{@application['ID']}"
-    puts "  application name: #{@application['name']}"
-    if @application['ID'] == '41544348'
-      puts "    description: #{@flac_file['description']}"
-      puts "    mime type: #{@flac_file['mime_type']}"
-      #  Don't want to dump binary data
-      if @flac_file['mime_type'] =~ /text/
-        puts '    raw data:'
-        puts @flac_file['raw_data']
-      else
-        puts "'Flac File' data may be binary. Use 'raw_data_dump' to see it"
-      end
-    else
-      puts '    raw data'
-      puts @application['raw_data']
-    end
-  end
-
-  def meta_seek
-    puts "  length: #{@seektable['block_size']}"
-    print_seektable
-  end
-
-  def meta_vorb
-    puts "  length: #{@tags['block_size']}"
-    puts "  vendor string: #{@tags['vendor_tag']}"
-    puts "  comments: #{@comment.size}"
-    n = 0
-    @comment.each do |c|
-      puts "    comment[#{n}]: #{c}"
-      n += 1
-    end
-  end
-
-  def meta_cue
-    puts "  length: #{@cuesheet['block_size']}"
-  end
-
-  def meta_pict(n)
-    puts "  length: #{@picture[n]['block_size']}"
-    puts "  type: #{@picture[n]['type_int']} => #{@picture[n]['type_string']}"
-    puts "  mimetype: #{@picture[n]['mime_type']}"
-    puts "  description: #{@picture[n]['description_string']}"
-    puts "  image width: #{@picture[n]['width']}"
-    puts "  image height: #{@picture[n]['height']}"
-    puts "  colour depth: #{@picture[n]['colour_depth']}"
-    puts "  number of colours: #{@picture[n]['n_colours']}"
-    puts "  image size: #{@picture[n]['raw_data_length']} bytes"
-  end
 
   #  This is where the 'real' parsing starts
   def parse_flac_meta_blocks
