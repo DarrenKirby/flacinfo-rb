@@ -81,7 +81,7 @@ class Stream
 
   # These blocks may occur multiple times.
   def applications
-    @blocks.find { |b| b.is_a?(Application) }
+    @blocks.grep(Application)
   end
 
   def application
@@ -112,6 +112,7 @@ class Stream
   def parse_file
     stream_marker = @io.read(4)
     #  First 4 bytes must be 0x66, 0x4C, 0x61, and 0x43
+    puts "stream marker: #{stream_marker}"
     if stream_marker != 'fLaC'
       raise FlacInfoReadError,
             "#{@filename} does not appear to be a valid Flac file"
@@ -327,19 +328,70 @@ end
 # track ISRCs. The CUESHEET block is especially useful for backing up CD-DA discs, but it can be used as a general
 # purpose cueing mechanism for playback.
 class Cuesheet < Block
+  attr_reader :media_catalog_number, :lead_in, :is_cd, :n_tracks, :cuesheet_tracks
 
-  FIELDS = %w[offset block_size].freeze
+  FIELDS = %w[offset block_size media_catalog_number lead_in is_cd n_tracks cuesheet_tracks].freeze
   BLOCK_NAME = 'CUESHEET'
+
+  Track = Struct.new(
+    :offset,
+    :track_number,
+    :isrc,
+    :type,
+    :preemphasis,
+    :indices
+  )
 
   def initialize(io, header)
     super(header)
     @io = io
+    @cuesheet_tracks = []
+    parse_cuesheet
   end
 
   private
 
-  # TODO: I do have a flac file with a cuesheet now, so this needs to be implemented.
-  def parse_seektable; end
+  def parse_cuesheet_track
+    track = Track.new
+    track.offset = @io.read(8).unpack1('Q>')
+    track.track_number = @io.read(1).unpack1('C')
+    raw_isrc = @io.read(12)
+    track.isrc = raw_isrc unless raw_isrc == "\0" * 12
+    raw_byte = @io.read(1).unpack1('C')
+    track.type = ((raw_byte >> 7) & 0x1).zero? ? 'AUDIO' : 'NON-AUDIO'
+    track.preemphasis = ((raw_byte >> 6) & 0x1) == 1
+    # 13 zero bytes.
+    @io.read(13)
+    n = @io.read(1).unpack1('C')
+    track.indices = []
+
+    n.times do
+      offset = @io.read(8).unpack1('Q>')
+      index = @io.read(1).unpack1('C')
+      # 3 zero bytes
+      @io.read(3)
+      track.indices << [offset, index]
+    end
+
+    @cuesheet_tracks << track
+  end
+
+  def parse_cuesheet
+    raw = @io.read(128)
+    catalog = raw.partition("\0").first
+    @media_catalog_number = catalog unless catalog.empty?
+    @lead_in = @io.read(8).unpack1('Q>')
+    # First bit of this next byte is the CD? flag.
+    @is_cd = ((@io.read(1).unpack1('C') >> 7) & 0x1) == 1
+    # 258 bytes reserved. All bits must be set to zero.
+    @io.read(258)
+    @n_tracks = @io.read(1).unpack1('C')
+
+    @n_tracks.times do
+      parse_cuesheet_track
+    end
+
+  end
 end
 
 # This block is for storing pictures associated with the file, most commonly cover art from CDs. There may be more than
@@ -549,6 +601,9 @@ class Unknown < Block
   end
 end
 
+# Mapping from block types to the classes that represent them. Defined down here, as otherwise we get an undefined
+# constant error because these classes must be instantiated. This table is used for the dynamic dispatch in the
+# read_header method in the Stream class.
 BLOCK_TYPES = {
   0 => Streaminfo,
   1 => Padding,
@@ -1063,8 +1118,7 @@ class FlacInfo
   #++
 
   private
-
-
+  
   #  This is where the 'real' parsing starts
   def parse_flac_meta_blocks
     @comments_changed = nil #  Do we need to write a new VORBIS_BLOCK?
