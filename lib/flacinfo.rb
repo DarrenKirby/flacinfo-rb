@@ -96,8 +96,12 @@ class Stream
     self.pictures.first
   end
 
-  def padding
+  def paddings
     @blocks.grep(Padding)
+  end
+
+  def padding
+    self.paddings.first
   end
 
   private
@@ -112,7 +116,6 @@ class Stream
   def parse_file
     stream_marker = @io.read(4)
     #  First 4 bytes must be 0x66, 0x4C, 0x61, and 0x43
-    puts "stream marker: #{stream_marker}"
     if stream_marker != 'fLaC'
       raise FlacInfoReadError,
             "#{@filename} does not appear to be a valid Flac file"
@@ -239,8 +242,10 @@ class Streaminfo < Block
   def parse_blocks_and_frames
     @minimum_block = @io.read(2).unpack1('n*')
     @maximum_block = @io.read(2).unpack1('n*')
-    @minimum_frame = @io.read(3).unpack1('n*')
-    @maximum_frame = @io.read(3).unpack1('n*')
+    bytes = @io.read(3).bytes
+    @minimum_frame = (bytes[0] << 16) | (bytes[1] << 8) | bytes[2]
+    bytes = @io.read(3).bytes
+    @maximum_frame = (bytes[0] << 16) | (bytes[1] << 8) | bytes[2]
   end
 
   def parse_streaminfo
@@ -260,8 +265,6 @@ end
 # relatively quick) instead of having to insert it into the right place in the existing file (which would normally
 # require rewriting the entire file).
 class Padding < Block
-  attr_reader :offset, :block_size
-
   FIELDS = %w[offset block_size].freeze
   BLOCK_NAME = 'PADDING'
 
@@ -1118,7 +1121,7 @@ class FlacInfo
   #++
 
   private
-  
+
   #  This is where the 'real' parsing starts
   def parse_flac_meta_blocks
     @comments_changed = nil #  Do we need to write a new VORBIS_BLOCK?
