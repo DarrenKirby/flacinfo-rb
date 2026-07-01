@@ -1,39 +1,25 @@
 # frozen_string_literal: true
 
-# = Description
-#
-# flacinfo-rb gives you access to low level information on Flac files.
-# * It parses stream information (METADATA_BLOCK_STREAMINFO).
-# * It parses Vorbis comments (METADATA_BLOCK_VORBIS_COMMENT).
-# * It allows you to add/delete/edit Vorbis comments and write them to the Flac file.
-# * It parses the seek table (METADATA_BLOCK_SEEKTABLE).
-# * It parses the 'application metadata block' (METADATA_BLOCK_APPLICATION).
-#   * If application is ID 0x41544348 (Flac File) then we can parse that too.
-# * It recognizes (but does not yet parse) the cue sheet (METADATA_BLOCK_CUESHEET).
-# * It parses zero or more picture blocks (METADATA_BLOCK_PICTURE)
-#   * It allows you to write the embedded images to a file.
-#
-# My goal is to create a nice native Ruby library interface which will allow
-# the user to mimic most functionality of the 'metaflac' binary programmatically.
-#
-# = Copyright and Disclaimer
+# Copyright and Disclaimer
 #
 # Copyright:: (C) 2006 - 2026 Darren Kirby
 #
 # FlacInfo is free software. No warranty is provided and the author
 # cannot accept responsibility for lost or damaged files.
 #
-# License:: GPL2
-# Author:: Darren Kirby (mailto:darren@dragonbyte.ca)
-# Website:: https://github.com/DarrenKirby/flacinfo-rb
+# * License:: GPL2
+# * Author:: Darren Kirby (mailto:darren@dragonbyte.ca)
+# * Website:: https://github.com/DarrenKirby/flacinfo-rb
 #
-# = More information
+# More information
 #
-# * The Flac spec has been made an official RFC. This RFC, and a simplified (read: easier to understand) spec are at:
-#   https://datatracker.ietf.org/doc/rfc9639/
-#   https://xiph.org/flac/old_format.html
-# * The Vorbis Comment spec is at:
-#   http://www.xiph.org/vorbis/doc/v-comment.html
+# The Flac spec has been made an official RFC. This RFC, and a simplified (read: easier to understand) spec are at:
+# * https://datatracker.ietf.org/doc/rfc9639/
+# * https://xiph.org/flac/old_format.html
+# The Vorbis Comment spec is at:
+# *http://www.xiph.org/vorbis/doc/v-comment.html
+
+# :markup: markdown
 
 # FlacInfoError is raised for general user errors.
 # It will print a string that describes the problem.
@@ -62,11 +48,12 @@ class Stream
     parse_file
   end
 
-  # These blocks may only occur once in the flac file.
+  # This block must be present at position 0.
   def streaminfo
     @blocks.find { |b| b.is_a?(Streaminfo) }
   end
 
+  # These blocks can occur 0 or 1 time.
   def seektable
     @blocks.find { |b| b.is_a?(Seektable) }
   end
@@ -79,7 +66,7 @@ class Stream
     @blocks.find { |b| b.is_a?(VorbisComment) }
   end
 
-  # These blocks may occur multiple times.
+  # These blocks may occur 0 or more times.
   def applications
     @blocks.grep(Application)
   end
@@ -393,7 +380,8 @@ class Cuesheet < Block
     @n_tracks.times do
       parse_cuesheet_track
     end
-
+  rescue StandardError => e
+    raise FlacInfoReadError, "Could not parse METADATA_BLOCK_CUESHEET: #{e.message}"
   end
 end
 
@@ -620,14 +608,23 @@ BLOCK_TYPES = {
 class MetaFlacPrinter
   attr_reader :flac, :io
 
-  def initialize(flac, io)
+  def initialize(flac, io, which = :all)
     @flac = flac
     @io = io
+    @which = which
   end
 
   def print
-    n = 0
-    @flac.blocks.each do |block|
+    blocks =
+      if @which == :all
+        @flac.blocks
+      else
+        result = @flac.public_send(@which)
+        result.is_a?(Array) ? result : [result]
+      end
+
+    blocks.each do |block|
+      n = @flac.blocks.index(block)
       @block = block
 
       @io.puts "METADATA block ##{n}"
@@ -656,8 +653,6 @@ class MetaFlacPrinter
     nil
   end
 
-  private
-
   def meta_stream
     @io.puts "  length: #{@block.block_size}"
     @io.puts "  minimum blocksize: #{@block.minimum_block} samples"
@@ -678,22 +673,22 @@ class MetaFlacPrinter
   def meta_app
     # TODO: this needs to be fixed once I can get a flac with
     # an application block.
-    @io.puts "  length: #{@application['block_size']}"
-    @io.puts "  id: #{@application['ID']}"
-    @io.puts "  application name: #{@application['name']}"
-    if @application['ID'] == '41544348'
-      @io.puts "    description: #{@flac_file['description']}"
-      @io.puts "    mime type: #{@flac_file['mime_type']}"
+    @io.puts "  length: #{@block.block_size}"
+    @io.puts "  id: #{@block.id}"
+    @io.puts "  application name: #{@block.name}"
+    if @block.id == '41544348'
+      @io.puts "    description: #{@block.flac_file['description']}"
+      @io.puts "    mime type: #{@block.flac_file['mime_type']}"
       #  Don't want to dump binary data
-      if @flac_file['mime_type'] =~ /text/
+      if @block.flac_file['mime_type'] =~ /text/
         @io.puts '    raw data:'
-        @io.puts @flac_file['raw_data']
+        @io.puts @block.flac_file['raw_data']
       else
         @io.puts "'Flac File' data may be binary. Use 'raw_data_dump' to see it"
       end
     else
       @io.puts '    raw data'
-      @io.puts @application['raw_data']
+      @io.puts @block.raw_data
     end
   end
 
@@ -738,63 +733,72 @@ class MetaFlacPrinter
   end
 end
 
+# FlacInfo presents the public interface.
+#
 # STREAMINFO is the only block guaranteed to be present in the Flac file.
-# All attributes will be present but empty if the associated block is not present in the Flac file,
-# except for 'picture' which will have the key 'n' with the value '0'.
-# All 'offset' and 'block_size' values do not include the block header. All block headers are 4 bytes
-# no matter the type, so if you need the offset including the header, subtract 4. If you need the size
+# The following 11 accessors will be present but return `nil` if the associated block is not present in the Flac file.
+# All except for `comment` and `tags` may be accessed using either the dot operator:
+#
+#    `FlacInfo.streaminfo.block_size => 34`
+#
+# Or using Hash syntax:
+#
+#    `FlacInfo.streaminfo['block_size'] => 34`
+#
+# All 'offset' and 'block_size' values do not include the block header regardless of the block type. All block headers
+# are 4 bytes no matter the type, so if you need the offset including the header, subtract 4. If you need the size
 # including the header, add 4.
 class FlacInfo
-  # Hash of values extracted from the STREAMINFO block. Keys are:
-  # 'offset'- The STREAMINFO block's offset from the beginning of the file (not including the block header).
-  # 'block_size'- The size of the STREAMINFO block (not including the block header).
-  # 'minimum_block'- The minimum block size (in samples) used in the stream.
-  # 'maximum_block'- The maximum block size (in samples) used in the stream.
-  # 'minimum_frame'- The minimum frame size (in bytes) used in the stream.
-  # 'maximum_frame'- The maximum frame size (in bytes) used in the stream.
-  # 'samplerate'- Sample rate in Hz.
-  # 'channels'- The number of channels used in the stream.
-  # 'bits_per_sample'- The number of bits per sample used in the stream.
-  # 'total_samples'- The total number of samples in stream.
-  # 'md5'- MD5 signature of the unencoded audio data.
+  # Access to values extracted from the STREAMINFO block. The fields are:
+  # * `offset` - The STREAMINFO block's offset from the beginning of the file (not including the block header).
+  # * `block_size` - The size of the STREAMINFO block (not including the block header).
+  # * `minimum_block` - The minimum block size (in samples) used in the stream.
+  # * `maximum_block` - The maximum block size (in samples) used in the stream.
+  # * `minimum_frame` - The minimum frame size (in bytes) used in the stream.
+  # * `maximum_frame` - The maximum frame size (in bytes) used in the stream.
+  # * `samplerate` - Sample rate in Hz.
+  # * `channels` - The number of channels used in the stream.
+  # * `bits_per_sample` - The number of bits per sample used in the stream.
+  # * `total_samples` - The total number of samples in stream.
+  # * `md5` - MD5 signature of the raw audio data frames.
   def streaminfo
     @flac.streaminfo
   end
 
-  # Hash of values extracted from the SEEKTABLE block. Keys are:
-  # 'offset'- The SEEKTABLE block's offset from the beginning of the file (not including the block header).
-  # 'block_size'- The size of the SEEKTABLE block (not including the block header).
-  # 'seek_points'- The number of seek points in the block.
-  # 'points'- Another hash whose keys start at 0 and end at ('seek_points' - 1). Each "seektable['points'][n]" hash
-  #            contains an array whose (integer) values are:
-  #            '0'- Sample number of first sample in the target frame, or 0xFFFFFFFFFFFFFFFF for a placeholder point.
-  #            '1'- Offset (in bytes) from the first byte of the first frame header to the first byte of the target
-  #                  frame's header.
-  #            '2'- Number of samples in the target frame.
+  # Access to values extracted from the SEEKTABLE block. Fields are -
+  # * `offset` - The SEEKTABLE block's offset from the beginning of the file (not including the block header).
+  # * `block_size` - The size of the SEEKTABLE block (not including the block header).
+  # * `seek_points` - The number of seek points in the block.
+  # * `points` - A hash whose keys start at 0 and end at ('seek_points' - 1). Each `seektable.points[n]` hash key
+  # contains an array whose (integer) values are -
+  #     * `0` - Sample number of first sample in the target frame, or 0xFFFFFFFFFFFFFFFF for a placeholder point.
+  #     * `1` - Offset (in bytes) from the first byte of the first frame header to the first byte of the target frame's
+  # header.
+  #      * `2` - Number of samples in the target frame.
   def seektable
     @flac.seektable
   end
 
-  # Array of "name=value" strings extracted from the VORBIS_COMMENT block. This is just the contents, metadata is in
-  # 'tags'. You should not normally operate on this array directly. Rather, use the comment_add and comment_del methods
+  # Array of `name=value` strings extracted from the VORBIS_COMMENT block. This is just the contents, metadata is in
+  # `tags`. You should not normally operate on this array directly. Rather, use the comment_add and comment_del methods
   # to make changes.
   def comment
     @flac.vorbis_comment.comment
   end
 
-  # Hash of the 'comment' values separated into "key => value" pairs as well as the keys:
-  # 'offset'- The VORBIS_COMMENT block's offset from the beginning of the file (not including the block header).
-  # 'block_size'- The size of the VORBIS_COMMENT block (not including the block header).
-  # 'vendor_tag'- Typically, the name and version of the software that encoded the file.
+  # Hash of each `comment` value separated into `key => value` pairs as well as the keys:
+  # * `offset` - The VORBIS_COMMENT block's offset from the beginning of the file (not including the block header).
+  # * `block_size` - The size of the VORBIS_COMMENT block (not including the block header).
+  # * `vendor_tag` - Typically, the name and version of the software that encoded the file.
   def tags
     @flac.vorbis_comment.tags
   end
 
   # Hash of values extracted from the APPLICATION block. Keys are:
-  # 'offset'- The APPLICATION block's offset from the beginning of the file (not including the block header).
-  # 'block_size'- The size of the APPLICATION block (not including the block header).
-  # 'ID'- Registered application ID. See http://flac.sourceforge.net/id.html
-  # 'name'- Name of the registered application ID.
+  # * `offset` - The APPLICATION block's offset from the beginning of the file (not including the block header).
+  # * `block_size` - The size of the APPLICATION block (not including the block header).
+  # * `id`- Registered application ID, as a hex string. See http://flac.sourceforge.net/id.html
+  # * `name`- Name of the registered application ID.
   def application
     @flac.application
   end
@@ -820,18 +824,18 @@ class FlacInfo
   # Hash of values extracted from one or more PICTURE blocks. This hash always includes the key 'n' which is the number
   # of PICTURE blocks found, else '0'. For each block found there will be an integer key starting from 1. Each of these
   # is a hash which contains the keys:
-  # 'offset'- The PICTURE block's offset from the beginning of the file (not including the block header).
-  # 'block_size'- The size of the PICTURE block (not including the block header).
-  # 'type_int'- The picture type according to the ID3v2 APIC frame.
-  # 'type_string'- A text value representing the picture type.
-  # 'description_string'- A text description of the picture.
-  # 'mime_type'- The MIME type string. May be '-->' to signify that the data part is a URL of the picture.
-  # 'colour_depth'- The colour depth of the picture in bits-per-pixel.
-  # 'n_colours'- For indexed-colour pictures (e.g. GIF), the number of colours used, or 0 for non-indexed pictures.
-  # 'width'- The width of the picture in pixels.
-  # 'height'- The height of the picture in pixels.
-  # 'raw_data_offset'- The raw picture data's offset from the beginning of the file.
-  # 'raw_data_length'- The length of the picture data in bytes.
+  # * 'offset' - The PICTURE block's offset from the beginning of the file (not including the block header).
+  # * 'block_size' - The size of the PICTURE block (not including the block header).
+  # * 'type_int' - The picture type according to the ID3v2 APIC frame.
+  # * 'type_string' - A text value representing the picture type.
+  # * 'description_string' - A text description of the picture.
+  # * 'mime_type' - The MIME type string. May be ' -->' to signify that the data part is a URL of the picture.
+  # * 'colour_depth' - The colour depth of the picture in bits-per-pixel.
+  # * 'n_colours' - For indexed-colour pictures (e.g. GIF), the number of colours used, or 0 for non-indexed pictures.
+  # * 'width' - The width of the picture in pixels.
+  # * 'height' - The height of the picture in pixels.
+  # * 'raw_data_offset' - The raw picture data's offset from the beginning of the file.
+  # * 'raw_data_length' - The length of the picture data in bytes.
   def picture
     @flac.picture
   end
@@ -840,18 +844,16 @@ class FlacInfo
     @flac.pictures
   end
 
-  # Hash of values extracted from an APPLICATION block if it is type 0x41544348 (Flac File).
-  # Keys are:
-  # 'description'- A brief text description of the contents.
-  # 'mime_type'- The Mime type of the contents.
-  # 'raw_data'- The contents. May be binary.
+  # Values extracted from an APPLICATION block if it is type 0x41544348 (Flac File). Fields are:
+  # * 'description'- A brief text description of the contents.
+  # * 'mime_type'- The Mime type of the contents.
+  # * 'raw_data'- The contents. May be binary.
   def flac_file
     @flac.flac_file
   end
 
   # FlacInfo is the class for parsing Flac files.
   #
-  # :call-seq:
   #   FlacInfo.new(file)   -> FlacInfo instance
   #
   def initialize(filename)
@@ -888,8 +890,7 @@ class FlacInfo
   #   FlacInfo.print_streaminfo   -> nil
   #
   def print_streaminfo
-    #  No test: METADATA_BLOCK_STREAMINFO must be present in valid Flac file
-    @flac.streaminfo.each_pair { |key, val| puts "#{key}: #{val}" }
+    MetaFlacPrinter.new(@flac, $stdout, :streaminfo).print
     nil
   end
 
@@ -901,17 +902,19 @@ class FlacInfo
   # Raises FlacInfoError if METADATA_BLOCK_SEEKTABLE is not present.
   #
   def print_seektable
-    raise FlacInfoError, 'METADATA_BLOCK_SEEKTABLE not present' if @seektable == {}
+    MetaFlacPrinter.new(@flac, $stdout, :seektable).print
+    nil
+  end
 
-    puts "  seek points: #{@flac.seektable.seek_points}"
-    n = 0
-    points = @flac.seektable.points
-    @flac.seektable.seek_points.times do
-      print "    point #{n}: sample number: #{points[n][0]}, "
-      print "stream offset: #{points[n][1]}, "
-      print "frame samples: #{points[n][2]}\n"
-      n += 1
-    end
+  # Pretty print the picture block(s).
+  #
+  # :call-seq:
+  #   FlacInfo.print_picture   -> nil
+  #
+  # Raises FlacInfoError if METADATA_BLOCK_SEEKTABLE is not present.
+  #
+  def print_picture
+    MetaFlacPrinter.new(@flac, $stdout, :pictures).print
     nil
   end
 
@@ -969,12 +972,12 @@ class FlacInfo
   # extension appended. The argument to ':n' is which image to write in case of multiples.
   #
   def write_picture(args = {})
-    raise FlacInfoError, 'There is no METADATA_BLOCK_PICTURE' if @picture['n'].zero?
+    raise FlacInfoError, 'There is no METADATA_BLOCK_PICTURE' if @flac.pictures.nil?
 
     n = if args.key?(:n)
           args[:n]
         else
-          1
+          0
         end
 
     #  "image/jpeg" => "jpeg"
