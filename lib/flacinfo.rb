@@ -72,7 +72,7 @@ class Stream
   end
 
   def application
-    self.applications.first
+    applications.first
   end
 
   def pictures
@@ -80,7 +80,7 @@ class Stream
   end
 
   def picture
-    self.pictures.first
+    pictures.first
   end
 
   def paddings
@@ -88,7 +88,7 @@ class Stream
   end
 
   def padding
-    self.paddings.first
+    paddings.first
   end
 
   private
@@ -718,6 +718,24 @@ class MetaFlacPrinter
 
   def meta_cue
     @io.puts "  length: #{@block.block_size}"
+    @io.puts "  media catalog number: #{@block.media_catalog_number}"
+    @io.puts "  lead in: #{@block.lead_in}"
+    @io.puts "  is CD: #{@block.is_cd}"
+    @io.puts "  number of tracks: #{@block.cuesheet_tracks.size}"
+    @block.cuesheet_tracks.each_with_index do |ct, i|
+      puts "    track[#{i}]"
+      puts "      offset: #{ct.offset}"
+      puts "      number: #{ct.track_number}"
+      puts "      ISRC: #{ct.isrc}"
+      puts "      type: #{ct.type}"
+      puts "      pre-emphasis: #{ct.preemphasis}"
+      puts "      number of index.points: #{ct.indices.size}"
+      ct.indices.each_with_index do |idx, j|
+        puts "        index[#{j}]"
+        puts "          offset: #{idx[0]}"
+        puts "          number: #{idx[1]}"
+      end
+    end
   end
 
   def meta_pict
@@ -903,6 +921,18 @@ class FlacInfo
   #
   def print_seektable
     MetaFlacPrinter.new(@flac, $stdout, :seektable).print
+    nil
+  end
+
+  # Pretty print the cuesheet.
+  #
+  # :call-seq:
+  #   FlacInfo.print_cuesheet   -> nil
+  #
+  # Raises FlacInfoError if METADATA_BLOCK_CUESHEET is not present.
+  #
+  def print_cuesheet
+    MetaFlacPrinter.new(@flac, $stdout, :cuesheet).print
     nil
   end
 
