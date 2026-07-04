@@ -1,5 +1,3 @@
-# frozen_string_literal: true
-
 # Copyright and Disclaimer
 #
 # Copyright:: (C) 2006 - 2026 Darren Kirby
@@ -21,6 +19,9 @@
 
 # :markup: markdown
 
+require 'tempfile'
+require 'fileutils'
+
 # FlacInfoError is raised for general user errors.
 # It will print a string that describes the problem.
 FlacInfoError = Class.new(StandardError)
@@ -33,17 +34,23 @@ FlacInfoReadError = Class.new(StandardError)
 # It will print a string that describes where the error occurred.
 FlacInfoWriteError = Class.new(StandardError)
 
+# Used for instantiating block object types that don't exist in the parsed file.
+FakeHeader = Struct.new(:type, :block_size, :offset, :is_last, keyword_init: true)
+
+# Used for tags['vendor_tag']
+FLAC_INFO_VERSION = '1.1.0'.freeze
+
 # The Stream class models the flac file as a whole. It contains an array of class objects that represent the
 # METADATA_BLOCK_DATA blocks in order and a pointer to the actual FRAME audio data. A FLAC bitstream consists of the
 # "fLaC" marker at the beginning of the stream, followed by a mandatory metadata block (called the STREAMINFO block),
 # any number of other metadata blocks, then the audio frames.
 class Stream
-  attr_reader :blocks, :frame_data
+  attr_reader :blocks
 
   def initialize(path)
-    @filename = path
+    @filename = path.freeze
     @blocks = []
-    @frame_data = nil
+    @frame_data_offset = nil
     @io = File.open(@filename)
     parse_file
   end
@@ -91,6 +98,20 @@ class Stream
     paddings.first
   end
 
+  def create_comment_block
+    @blocks.last.is_last = false
+    new_block = VorbisComment.from_scratch
+    @blocks << new_block
+    # Return the instance so the UI wrapper can call .add_comment on it
+    new_block
+  end
+
+  def write_file(filename)
+    # TODO
+    # We need to determine if we are writing in-place, or to a new file. In case of the former, we need to determine
+    # whether our metadata fits in-place before the audio frames, or whether we need a complete rewrite.
+  end
+
   private
 
   def read_header
@@ -103,17 +124,45 @@ class Stream
   def parse_file
     stream_marker = @io.read(4)
     #  First 4 bytes must be 0x66, 0x4C, 0x61, and 0x43
-    if stream_marker != 'fLaC'
-      raise FlacInfoReadError,
-            "#{@filename} does not appear to be a valid Flac file"
-    end
+    raise FlacInfoReadError, "#{@filename} does not appear to be a valid Flac file" if stream_marker != 'fLaC'
 
     last = 0
     last = read_header until last == 1
 
     # The rest of the file is FRAME audio data.
-    @frame_data = @io.read
+    # We don't need to keep this in memory
+    @frame_data_offset = @io.tell
+    @frame_data_offset.freeze
     @io.close
+  end
+
+  # If a complete re-write is necessary, using a tmpfile i the fastest/safest approach.
+  def write_tmp_file(filename = nil)
+    outfile = filename || @filename
+
+    # The type-checker was complaining, so we'll be defensive.
+    raise FlacInfoWriteError, 'Frame data offset is missing' if @frame_data_offset.nil?
+
+    # Create a temporary file to safely stream the new data into.
+    # This prevents us from corrupting the original file if the process crashes halfway through.
+    Tempfile.create('FlacInfo') do |temp_file|
+      temp_file.binmode
+
+      # Write all the blocks to the temp file
+      @blocks.each do |block|
+        temp_file.write(block.serialize(@filename))
+      end
+
+      # Copy the audio frame data directly from the original file to the temp file.
+      File.open(@filename, 'rb') do |original_file|
+        IO.copy_stream(original_file, temp_file, nil, @frame_data_offset)
+      end
+
+      # Replace the target file with our newly built temp file
+      FileUtils.mv(temp_file.path, outfile)
+    end
+  rescue StandardError => e
+    raise FlacInfoWriteError, "error writing flac file: #{e.message}"
   end
 end
 
@@ -192,6 +241,18 @@ class Block
 
     "#<#{self.class} #{attrs}>"
   end
+
+  private
+
+  def build_block_header(type, size, last)
+    # Combine last (1 bit), type (7 bits), and size (24 bits) into a 32-bit integer
+    header_int = ((last & 1) << 31) | ((type & 0x7f) << 24) | (size & 0xffffff)
+
+    # Pack the 32-bit integer as a big-endian network byte order string
+    [header_int].pack('N')
+  rescue StandardError => e
+    raise FlacInfoWriteError, "error building block header: #{e.message}"
+  end
 end
 
 # This block has information about the whole stream, like sample rate, number of channels, total number of samples, etc.
@@ -203,7 +264,7 @@ class Streaminfo < Block
 
   FIELDS = %w[offset block_size minimum_block maximum_block minimum_frame maximum_frame samplerate channels
               bits_per_sample total_samples md5].freeze
-  BLOCK_NAME = 'STREAMINFO'
+  BLOCK_NAME = 'STREAMINFO'.freeze
 
   def initialize(io, header)
     super(header)
@@ -239,10 +300,20 @@ class Streaminfo < Block
     parse_blocks_and_frames
     parse_channels_and_samples
 
-    #  128 bits :: MD5 signature of the unencoded audio data.
+    # 128 bits :: MD5 signature of the unencoded audio data.
     @md5 = @io.read(16).unpack1('H32')
   rescue StandardError => e
     raise FlacInfoReadError, "Could not parse METADATA_BLOCK_STREAMINFO: #{e.message}"
+  end
+
+  # Return a byte-representation of the stream marker, STREAMINFO header, and STREAMINFO block. The only thing that
+  # could have possibly changed is whether it's the last block or not. Size and content is persistent no matter what
+  # else in the Stream object may have changed, so we just read it from the original file.
+  def serialize(filename)
+    payload = ''.b
+    payload << 'fLaC'
+    payload << build_block_header(@type, @block_size, @is_last)
+    payload << File.binread(filename, @block_size, @offset)
   end
 end
 
@@ -253,11 +324,13 @@ end
 # require rewriting the entire file).
 class Padding < Block
   FIELDS = %w[offset block_size].freeze
-  BLOCK_NAME = 'PADDING'
+  BLOCK_NAME = 'PADDING'.freeze
 
   def initialize(io, header)
     super(header)
     @io = io
+    @new = false
+    @dirty = false
     parse_padding
   end
 
@@ -269,6 +342,11 @@ class Padding < Block
     @io.seek(@block_size, IO::SEEK_CUR)
   rescue StandardError => e
     raise FlacInfoReadError, "Could not parse METADATA_BLOCK_PADDING: #{e.message}"
+  end
+
+  def serialize
+    data = build_block_header(@type, @block_size, @is_last)
+    data + "\0" * @block_size
   end
 end
 
@@ -282,7 +360,7 @@ class Seektable < Block
   attr_reader :seek_points, :points
 
   FIELDS = %w[offset block_size seek_points points].freeze
-  BLOCK_NAME = 'SEEKTABLE'
+  BLOCK_NAME = 'SEEKTABLE'.freeze
 
   def initialize(io, header)
     super(header)
@@ -311,6 +389,13 @@ class Seektable < Block
   rescue StandardError => e
     raise FlacInfoReadError, "Could not parse METADATA_BLOCK_SEEKTABLE: #{e.message}"
   end
+
+  ###
+  def serialize(filename)
+    payload = ''.b
+    payload << build_block_header(@type, @block_size, @is_last)
+    payload << File.binread(filename, @block_size, @offset)
+  end
 end
 
 # This block is for storing various information that can be used in a cue sheet. It supports track and index points,
@@ -321,7 +406,7 @@ class Cuesheet < Block
   attr_reader :media_catalog_number, :lead_in, :is_cd, :n_tracks, :cuesheet_tracks
 
   FIELDS = %w[offset block_size media_catalog_number lead_in is_cd n_tracks cuesheet_tracks].freeze
-  BLOCK_NAME = 'CUESHEET'
+  BLOCK_NAME = 'CUESHEET'.freeze
 
   Track = Struct.new(
     :offset,
@@ -383,6 +468,11 @@ class Cuesheet < Block
   rescue StandardError => e
     raise FlacInfoReadError, "Could not parse METADATA_BLOCK_CUESHEET: #{e.message}"
   end
+
+  def serialize(filename)
+    data = build_block_header(@type, @block_size, @is_last)
+    data + File.binread(filename, @block_size, @offset)
+  end
 end
 
 # This block is for storing pictures associated with the file, most commonly cover art from CDs. There may be more than
@@ -402,11 +492,12 @@ class Picture < Block
                   'Publisher/Studio logotype'].freeze
   FIELDS = %w[offset block_size type_int type_string description_string mime_type colour_depth n_colours width height
               raw_data_offset raw_data_length].freeze
-  BLOCK_NAME = 'PICTURE'
+  BLOCK_NAME = 'PICTURE'.freeze
 
   def initialize(io, header)
     super(header)
     @io = io
+    @new = false
     parse_picture
   end
 
@@ -434,6 +525,16 @@ class Picture < Block
   rescue StandardError => e
     raise FlacInfoReadError, "Could not parse METADATA_BLOCK_PICTURE: #{e.message}"
   end
+
+  def serialize(filename)
+    data = build_block_header(@type, @block_size, @is_last)
+    if @new
+      # What we do?
+    else
+      data += File.binread(filename, @block_size, @offset)
+    end
+    data
+  end
 end
 
 # This block is for use by third-party applications. The only mandatory field is a 32-bit identifier. This ID is granted
@@ -444,7 +545,7 @@ class Application < Block
   attr_reader :id, :name, :raw_data, :flac_file
 
   FIELDS = %w[block_size offset id name raw_data flac_file].freeze
-  BLOCK_NAME = 'APPLICATION'
+  BLOCK_NAME = 'APPLICATION'.freeze
 
   APP_ID = {
     '41544348' => 'FlacFile',
@@ -516,7 +617,7 @@ end
 class VorbisComment < Block
   attr_reader :tags, :comment
 
-  BLOCK_NAME = 'VORBIS_COMMENT'
+  BLOCK_NAME = 'VORBIS_COMMENT'.freeze
   FIELDS = %w[offset block_size comment tags].freeze
 
   def initialize(io, header)
@@ -526,8 +627,38 @@ class VorbisComment < Block
     @comment = []
     @tags['block_size'] = @block_size
     @tags['offset'] = @offset
+    @new = false
+    @dirty = false
 
     parse_vorbis_comments
+  end
+
+  def self.from_scratch
+    # 2. Instantiate the Struct cleanly using keyword arguments
+    header = FakeHeader.new(type: 4, block_size: 0, offset: nil, is_last: true)
+
+    # 3. Call new with a nil IO and your fake header
+    instance = new(nil, header)
+
+    # 4. Customize the state
+    instance.tags['vendor_tag'] = "FlacInfo version #{FLAC_INFO_VERSION}"
+    instance.instance_variable_set(:@new, true)
+    instance.instance_variable_set(:@dirty, true)
+
+    instance
+  end
+
+  def add_comment(str)
+    @comment << str
+    split_comment(str) # Add to tags hash.
+    @dirty = true
+  end
+
+  def delete_comment(key)
+    # Remove all matching strings from the array (e.g. "Artist=...")
+    @comment.reject! { |c| c.start_with?("#{key}=") }
+    @tags.delete(key) # Remove it from the hash
+    @dirty = true
   end
 
   def [](key)
@@ -548,18 +679,22 @@ class VorbisComment < Block
 
   private
 
+  def split_comment(str)
+    k, v = str.split('=', 2)
+    #  Vorbis spec says we can have more than one identical comment ie:
+    #  comment[0]="Artist=Charlie Parker"
+    #  comment[1]="Artist=Miles Davis"
+    #  so we just append the second and subsequent values to the first
+    @tags[k] = if @tags.key?(k)
+                 "#{@tags[k]}, #{v}"
+               else
+                 v
+               end
+  end
+
   def split_comments
     @comment.each do |c|
-      k, v = c.split('=', 2)
-      #  Vorbis spec says we can have more than one identical comment ie:
-      #  comment[0]="Artist=Charlie Parker"
-      #  comment[1]="Artist=Miles Davis"
-      #  so we just append the second and subsequent values to the first
-      @tags[k] = if @tags.key?(k)
-                   "#{@tags[k]}, #{v}"
-                 else
-                   v
-                 end
+      split_comment(c)
     end
   end
 
@@ -576,9 +711,38 @@ class VorbisComment < Block
     end
 
     split_comments
-
   rescue StandardError => e
     raise FlacInfoReadError, "Could not parse METADATA_BLOCK_VORBIS_COMMENT: #{e.message}"
+  end
+
+  def build_vorbis_comment_block
+    # Initialize an empty string, forced to binary encoding (.b)
+    payload = ''.b
+
+    vendor = @tags['vendor_tag'].to_s
+    payload << [vendor.bytesize].pack('V')
+    payload << vendor
+
+    payload << [@comment.length].pack('V')
+
+    @comment.each do |c|
+      payload << [c.bytesize].pack('V')
+      payload << c.to_s
+    end
+
+    payload
+  rescue StandardError => e
+    raise FlacInfoWriteError, "Could not build METADATA_BLOCK_VORBIS_COMMENT: #{e.message}"
+  end
+
+  def serialize(filename)
+    packed_tags = if @new || @dirty
+                    build_vorbis_comment_block
+                  else
+                    File.binread(filename, @block_size, @offset)
+                  end
+    data = build_block_header(@type, packed_tags.bytesize, @is_last)
+    data + packed_tags
   end
 end
 
@@ -589,6 +753,17 @@ class Unknown < Block
   def initialize(io, header)
     super(header)
     @io = io
+    skip_unknown
+  end
+
+  # Just fast-forward over the block.
+  def skip_unknown
+    @io.seek(@block_size, IO::SEEK_CUR)
+  end
+
+  def serialize(filename)
+    data = build_block_header(@type, @block_size, @is_last)
+    data + File.binread(filename, @block_size, @offset)
   end
 end
 
@@ -605,6 +780,8 @@ BLOCK_TYPES = {
   6 => Picture
 }.freeze
 
+# This class formats the metadata blocks for use with 'meta_flac', as well as the individual 'print_<block type>'
+# methods.
 class MetaFlacPrinter
   attr_reader :flac, :io
 
@@ -671,8 +848,6 @@ class MetaFlacPrinter
   end
 
   def meta_app
-    # TODO: this needs to be fixed once I can get a flac with
-    # an application block.
     @io.puts "  length: #{@block.block_size}"
     @io.puts "  id: #{@block.id}"
     @io.puts "  application name: #{@block.name}"
@@ -812,7 +987,7 @@ class FlacInfo
     @flac.vorbis_comment.tags
   end
 
-  # Hash of values extracted from the APPLICATION block. Keys are:
+  # Values extracted from the APPLICATION block. Keys are:
   # * `offset` - The APPLICATION block's offset from the beginning of the file (not including the block header).
   # * `block_size` - The size of the APPLICATION block (not including the block header).
   # * `id`- Registered application ID, as a hex string. See http://flac.sourceforge.net/id.html
@@ -825,21 +1000,21 @@ class FlacInfo
     @flac.applications
   end
 
-  # Hash of values extracted from the PADDING block. Keys are:
+  # Values extracted from the PADDING block. Keys are:
   # 'offset'- The PADDING block's offset from the beginning of the file (not including the block header).
   # 'block_size'- The size of the PADDING block (not including the block header).
   def padding
     @flac.padding
   end
 
-  # Hash of values extracted from the CUESHEET block. Keys are:
+  # Values extracted from the CUESHEET block. Keys are:
   # 'offset'- The CUESHEET block's offset from the beginning of the file (not including the block header).
   # 'block_size'- The size of the CUESHEET block (not including the block header).
   def cuesheet
     @flac.cuesheet
   end
 
-  # Hash of values extracted from one or more PICTURE blocks. This hash always includes the key 'n' which is the number
+  # Values extracted from one or more PICTURE blocks. This hash always includes the key 'n' which is the number
   # of PICTURE blocks found, else '0'. For each block found there will be an integer key starting from 1. Each of these
   # is a hash which contains the keys:
   # * 'offset' - The PICTURE block's offset from the beginning of the file (not including the block header).
@@ -854,15 +1029,18 @@ class FlacInfo
   # * 'height' - The height of the picture in pixels.
   # * 'raw_data_offset' - The raw picture data's offset from the beginning of the file.
   # * 'raw_data_length' - The length of the picture data in bytes.
+  #
+  # 'picture' returns the first picture block found directly.
   def picture
     @flac.picture
   end
 
+  # 'pictures' returns an array of all picture blocks found, possibly length 1.
   def pictures
     @flac.pictures
   end
 
-  # Values extracted from an APPLICATION block if it is type 0x41544348 (Flac File). Fields are:
+  # Values extracted from an APPLICATION block if it is type 0x41544348 (FlacFile). Fields are:
   # * 'description'- A brief text description of the contents.
   # * 'mime_type'- The Mime type of the contents.
   # * 'raw_data'- The contents. May be binary.
@@ -885,6 +1063,8 @@ class FlacInfo
   #   FlacInfo.hastag?(tag)   -> bool
   #
   def hastag?(tag)
+    return false if tags.nil?
+
     @flac.vorbis_comment[tag] ? true : false
   end
 
@@ -896,7 +1076,7 @@ class FlacInfo
   # Raises FlacInfoError if METADATA_BLOCK_VORBIS_COMMENT is not present.
   #
   def print_tags
-    raise FlacInfoError, 'METADATA_BLOCK_VORBIS_COMMENT not present' if @tags == {}
+    raise FlacInfoError, 'METADATA_BLOCK_VORBIS_COMMENT not present' if tags.nil?
 
     @flac.vorbis_comment.each_pair { |key, val| puts "#{key}: #{val}" }
     nil
@@ -920,6 +1100,8 @@ class FlacInfo
   # Raises FlacInfoError if METADATA_BLOCK_SEEKTABLE is not present.
   #
   def print_seektable
+    raise FlacInfoError, 'METADATA_BLOCK_SEEKTABLE not present' if seektable.nil?
+
     MetaFlacPrinter.new(@flac, $stdout, :seektable).print
     nil
   end
@@ -932,6 +1114,8 @@ class FlacInfo
   # Raises FlacInfoError if METADATA_BLOCK_CUESHEET is not present.
   #
   def print_cuesheet
+    raise FlacInfoError, 'METADATA_BLOCK_CUESHEET not present' if cuesheet.nil?
+
     MetaFlacPrinter.new(@flac, $stdout, :cuesheet).print
     nil
   end
@@ -941,9 +1125,11 @@ class FlacInfo
   # :call-seq:
   #   FlacInfo.print_picture   -> nil
   #
-  # Raises FlacInfoError if METADATA_BLOCK_SEEKTABLE is not present.
+  # Raises FlacInfoError if METADATA_BLOCK_PICTURE is not present.
   #
   def print_picture
+    raise FlacInfoError, 'METADATA_BLOCK_PICTURE not present' if pictures.nil?
+
     MetaFlacPrinter.new(@flac, $stdout, :pictures).print
     nil
   end
@@ -973,7 +1159,7 @@ class FlacInfo
   # if there is no Flac File data present.
   #
   def raw_data_dump(outfile = nil)
-    raise FlacInfoError, 'Flac File data not present' if @flac_file == {}
+    raise FlacInfoError, 'Flac File data not present' if flac_file == {}
 
     if outfile.nil?
       puts @flac_file['raw_data']
@@ -1002,7 +1188,7 @@ class FlacInfo
   # extension appended. The argument to ':n' is which image to write in case of multiples.
   #
   def write_picture(args = {})
-    raise FlacInfoError, 'There is no METADATA_BLOCK_PICTURE' if @flac.pictures.nil?
+    raise FlacInfoError, 'There is no METADATA_BLOCK_PICTURE' if pictures.nil?
 
     n = if args.key?(:n)
           args[:n]
@@ -1015,7 +1201,7 @@ class FlacInfo
 
     outfile = if !args.key?(:outfile)
                 if [nil, ''].include?(@tags['album'])
-                  "flacimage#{n}.#{extension}"
+                  "flac_image#{n}.#{extension}"
                 else
                   #  Try to use contents of "album" tag for the filename
                   "#{@tags['album']}#{n}.#{extension}"
@@ -1029,7 +1215,7 @@ class FlacInfo
 
     out_p.binmode #  For Windows folks...
 
-    in_p.seek(@picture[n]['raw_data_offset'], IO::SEEK_CUR)
+    in_p.seek(@picture[n]['raw_data_offset'], IO::SEEK_SET)
     raw_data = in_p.read(@picture[n]['raw_data_length'])
     out_p.write(raw_data)
 
@@ -1039,15 +1225,17 @@ class FlacInfo
     nil
   end
 
-  # Writes Vorbis tag changes to disk
+  # Writes any changes to disk
   #
   # :call-seq:
-  #   FlacInfo.update!   -> bool
+  #   FlacInfo.write_file!             -> bool
+  #   FlacInfo.write_file(filename)!   -> bool
   #
-  # Returns true if write was successful, false otherwise.
+  # Returns true if write was successful, false otherwise. If the optional 'filename' is passed to the method, then the
+  # flac will be written to that file. Otherwise, the original input file will be overwritten in-place.
   #
-  def update!
-    write_to_disk ? true : false
+  def write_file!(filename = nil)
+    @flac.write_file(filename)
   end
 
   # Adds a new comment to the comment array
@@ -1057,19 +1245,19 @@ class FlacInfo
   #
   # 'str' must be in the form 'name=value', or 'name=' if you want to
   # set an empty value for a particular tag. Returns 'true' if successful,
-  # false otherwise. Remember to call 'update!' to write changes to the file.
+  # false otherwise.
   #
-  def comment_add(name)
-    if name !~ /\w=/ #  We accept 'name=' in case you want to leave the value empty
+  def comment_add(str)
+    if str !~ /\w=/ #  We accept 'name=' in case you want to leave the value empty
       raise FlacInfoError, "comments must be in the form 'name=value'"
     end
 
-    begin
-      @comment << name
-      @comments_changed = 1
-    rescue StandardError
-      return false
-    end
+    # Find the existing block, or tell Stream to create one and return it
+    block = @flac.vorbis_comment || @flac.create_comment_block
+
+    # Tell the block to update itself
+    block.add_comment(str)
+
     true
   end
 
@@ -1084,20 +1272,14 @@ class FlacInfo
   # comment was deleted, false otherwise. Remember to call
   # 'update!' to write changes to the file.
   #
-  def comment_del(name)
-    bc = Array.new(@comment) #  We need a copy
-    nc = if name.include? '='
-           @comment.delete_if { |x| x == name }
-         else
-           @comment.delete_if { |x| x.split('=')[0] == name }
-         end
+  def comment_del(key)
+    block = @flac.vorbis_comment
 
-    if nc == bc
-      false
-    else
-      @comments_changed = 1
-      true
-    end
+    # If there is no Vorbis block, there's nothing to delete!
+    return false if block.nil?
+
+    block.delete_comment(key)
+    true
   end
 
   # Adds a padding block
@@ -1157,35 +1339,7 @@ class FlacInfo
 
   #  This is where the 'real' parsing starts
   def parse_flac_meta_blocks
-    @comments_changed = nil #  Do we need to write a new VORBIS_BLOCK?
     @flac = Stream.new(@filename)
-  end
-
-  #  Here we begin the FlacInfo write methods
-
-  #  Build a block header given a type, a size, and whether it is last
-  def build_block_header(type, size, last)
-    bit_string = format('%b%7b', last, type).gsub(' ', '0')
-    block_header_s = [bit_string].pack('B*')
-    block_header_s + [size].pack('VX').reverse # size is 3 bytes
-  rescue StandardError => e
-    raise FlacInfoWriteError, "error building block header: #{e.message}"
-  end
-
-  #  Build a string of packed data for the Vorbis comments
-  def build_vorbis_comment_block
-    vorbis_comm_s  = [@tags['vendor_tag'].length].pack('V')
-    vorbis_comm_s += [@tags['vendor_tag']].pack('A*')
-    vorbis_comm_s += [@comment.length].pack('V')
-
-    @comment.each do |c|
-      vorbis_comm_s += [c.bytesize].pack('V')
-      vorbis_comm_s += [c].pack('A*')
-    end
-
-    vorbis_comm_s
-  rescue StandardError => e
-    raise FlacInfoWriteError, "error building vorbis comment block: #{e.message}"
   end
 
   def write_to_disk
@@ -1216,7 +1370,7 @@ class FlacInfo
     flac.binmode #  For Windows folks...
 
     #  Position ourselves at end of current Vorbis block
-    flac.seek(@tags['offset'] + @tags['block_size'], IO::SEEK_CUR)
+    flac.seek(@tags['offset'] + @tags['block_size'], IO::SEEK_SET)
     #  The data we need to shuffle starts at current position and ends at
     #  the beginning of the padding block, so the size we need to read is:
     #
@@ -1242,7 +1396,7 @@ class FlacInfo
     flac = File.new(@filename, 'r+b')
     flac.binmode #  For Windows folks...
 
-    flac.seek(@tags['offset'] + @tags['block_size'], IO::SEEK_CUR)
+    flac.seek(@tags['offset'] + @tags['block_size'], IO::SEEK_SET)
     rest_of_file = flac.read
     flac.seek(@tags['offset'] - 4, IO::SEEK_SET)
 
