@@ -615,18 +615,18 @@ end
 # tagging mechanism in FLAC. There may be only one VORBIS_COMMENT block in a stream. In some external documentation,
 # Vorbis comments are called FLAC tags to lessen confusion.
 class VorbisComment < Block
-  attr_reader :tags, :comment
+  attr_reader :tags, :comment, :vendor_tag
 
   BLOCK_NAME = 'VORBIS_COMMENT'.freeze
-  FIELDS = %w[offset block_size comment tags].freeze
+  FIELDS = %w[offset block_size vendor_tag comment tags].freeze
 
   def initialize(io, header)
     super(header)
     @io = io
     @tags = {}
     @comment = []
-    @tags['block_size'] = @block_size
-    @tags['offset'] = @offset
+    #@tags['block_size'] = @block_size
+    #@tags['offset'] = @offset
     @new = false
     @dirty = false
 
@@ -661,21 +661,21 @@ class VorbisComment < Block
     @dirty = true
   end
 
-  def [](key)
-    @tags[key]
-  end
-
-  def each_pair(&block)
-    @tags.each_pair(&block)
-  end
-
-  def keys
-    @tags.keys
-  end
-
-  def to_h
-    @tags.dup
-  end
+  # def [](key)
+  #   @tags[key]
+  # end
+  #
+  # def each_pair(&block)
+  #   @tags.each_pair(&block)
+  # end
+  #
+  # def keys
+  #   @tags.keys
+  # end
+  #
+  # def to_h
+  #   @tags.dup
+  # end
 
   private
 
@@ -700,7 +700,7 @@ class VorbisComment < Block
 
   def parse_vorbis_comments
     vendor_length = @io.read(4).unpack1('L<')
-    @tags['vendor_tag'] = @io.read(vendor_length)
+    @vendor_tag = @io.read(vendor_length)
 
     user_comment_list_length = @io.read(4).unpack1('L<')
     n = 0
@@ -719,7 +719,7 @@ class VorbisComment < Block
     # Initialize an empty string, forced to binary encoding (.b)
     payload = ''.b
 
-    vendor = @tags['vendor_tag'].to_s
+    vendor = @vendor_tag.to_s
     payload << [vendor.bytesize].pack('V')
     payload << vendor
 
@@ -832,13 +832,13 @@ class MetaFlacPrinter
 
   def meta_stream
     @io.puts "  length: #{@block.block_size}"
-    @io.puts "  minimum blocksize: #{@block.minimum_block} samples"
-    @io.puts "  maximum blocksize: #{@block.maximum_block} samples"
-    @io.puts "  minimum framesize: #{@block.minimum_frame} bytes"
-    @io.puts "  maximum framesize: #{@block.maximum_frame} bytes"
+    @io.puts "  minimum block size: #{@block.minimum_block} samples"
+    @io.puts "  maximum block size: #{@block.maximum_block} samples"
+    @io.puts "  minimum frame size: #{@block.minimum_frame} bytes"
+    @io.puts "  maximum frame size: #{@block.maximum_frame} bytes"
     @io.puts "  sample rate: #{@block.samplerate} Hz"
     @io.puts "  channels: #{@block.channels}"
-    @io.puts "  bits-per-sample: #{@block.bits_per_sample}"
+    @io.puts "  bits per sample: #{@block.bits_per_sample}"
     @io.puts "  total samples: #{@block.total_samples}"
     @io.puts "  MD5 signature: #{@block.md5}"
   end
@@ -882,7 +882,7 @@ class MetaFlacPrinter
 
   def meta_vorb
     @io.puts "  length: #{@block.block_size}"
-    @io.puts "  vendor string: #{@block.tags['vendor_tag']}"
+    @io.puts "  vendor string: #{@block.vendor_tag}"
     @io.puts "  comments: #{@block.comment.size}"
     n = 0
     @block.comment.each do |v|
@@ -930,7 +930,7 @@ end
 #
 # STREAMINFO is the only block guaranteed to be present in the Flac file.
 # The following 11 accessors will be present but return `nil` if the associated block is not present in the Flac file.
-# All except for `comment` and `tags` may be accessed using either the dot operator:
+# All except for `tags` may be accessed using either the dot operator:
 #
 #    `FlacInfo.streaminfo.block_size => 34`
 #
@@ -967,35 +967,41 @@ class FlacInfo
   #     * `0` - Sample number of first sample in the target frame, or 0xFFFFFFFFFFFFFFFF for a placeholder point.
   #     * `1` - Offset (in bytes) from the first byte of the first frame header to the first byte of the target frame's
   # header.
-  #      * `2` - Number of samples in the target frame.
+  #     * `2` - Number of samples in the target frame.
+  # Returns nil if SEEKTABLE block is not present.
   def seektable
     @flac.seektable
   end
 
-  # Array of `name=value` strings extracted from the VORBIS_COMMENT block. This is just the contents, metadata is in
-  # `tags`. You should not normally operate on this array directly. Rather, use the comment_add and comment_del methods
-  # to make changes.
-  def comment
-    @flac.vorbis_comment.comment
+  # Values extracted from the VORBIS_COMMENT block. Fields are:
+  # * 'offset' - The VORBIS_COMMENT block's offset from the beginning of the file (not including the block header).
+  # * 'block_size' - The size of the VORBIS_COMMENT block (not including the block header).
+  # * 'vendor_tag' - Typically, this is the name/version of the encoding software.
+  # * 'comment' - An array of the comment strings, ie: ["ARTIST=Miles Davis", ...].
+  # * 'tags' - a hash of the 'comment' strings split into k: v pairs. Note that this data can be accessed directly
+  # through the 'tags' accessor.
+  # Returns nil if VORBIS_COMMENT block is not present.
+  def vorbis_comment
+    @flac.vorbis_comment
   end
 
-  # Hash of each `comment` value separated into `key => value` pairs as well as the keys:
-  # * `offset` - The VORBIS_COMMENT block's offset from the beginning of the file (not including the block header).
-  # * `block_size` - The size of the VORBIS_COMMENT block (not including the block header).
-  # * `vendor_tag` - Typically, the name and version of the software that encoded the file.
+  # Hash of each `comment` value separated into `key => value` pairs.
   def tags
     @flac.vorbis_comment.tags
   end
 
-  # Values extracted from the APPLICATION block. Keys are:
+  # Values extracted from the APPLICATION block(s). Keys are:
   # * `offset` - The APPLICATION block's offset from the beginning of the file (not including the block header).
   # * `block_size` - The size of the APPLICATION block (not including the block header).
   # * `id`- Registered application ID, as a hex string. See http://flac.sourceforge.net/id.html
   # * `name`- Name of the registered application ID.
+  #
+  # 'application' returns the first APPLICATION block found directly, or nil if there are none.
   def application
     @flac.application
   end
 
+  # 'applications' returns an array of all APPLICATION blocks found, or nil if there are none.
   def applications
     @flac.applications
   end
@@ -1010,6 +1016,7 @@ class FlacInfo
   # Values extracted from the CUESHEET block. Keys are:
   # 'offset'- The CUESHEET block's offset from the beginning of the file (not including the block header).
   # 'block_size'- The size of the CUESHEET block (not including the block header).
+  # Returns nil if CUESHEET block is not present.
   def cuesheet
     @flac.cuesheet
   end
@@ -1030,12 +1037,12 @@ class FlacInfo
   # * 'raw_data_offset' - The raw picture data's offset from the beginning of the file.
   # * 'raw_data_length' - The length of the picture data in bytes.
   #
-  # 'picture' returns the first picture block found directly.
+  # 'picture' returns the first PICTURE block found directly, or nil if there are none.
   def picture
     @flac.picture
   end
 
-  # 'pictures' returns an array of all picture blocks found, possibly length 1.
+  # 'pictures' returns an array of all PICTURE blocks found, or nil if there are none.
   def pictures
     @flac.pictures
   end
@@ -1075,10 +1082,11 @@ class FlacInfo
   #
   # Raises FlacInfoError if METADATA_BLOCK_VORBIS_COMMENT is not present.
   #
-  def print_tags
+  def print_vorbis_comment
     raise FlacInfoError, 'METADATA_BLOCK_VORBIS_COMMENT not present' if tags.nil?
 
-    @flac.vorbis_comment.each_pair { |key, val| puts "#{key}: #{val}" }
+    MetaFlacPrinter.new(@flac, $stdout, :vorbis_comment).print
+    # @flac.vorbis_comment.each_pair { |key, val| puts "#{key}: #{val}" }
     nil
   end
 
@@ -1282,48 +1290,6 @@ class FlacInfo
     true
   end
 
-  # Adds a padding block
-  #
-  # :call-seq:
-  #   FlacInfo.padding_add!(size)   --> Boolean
-  #
-  # 'size' is an optional integer argument for the
-  # size of the padding block. It defaults to 4096 bytes.
-  # Returns true if successful, else false.
-  #
-  def padding_add!(size = 4096)
-    @metadata_blocks.each do |type|
-      raise FlacInfoError, "PADDING block exists. Use 'padding_resize!'" if type[0] == 'padding'
-    end
-    build_padding_block(size) ? true : false
-  end
-
-  # Removes a padding block
-  #
-  # :call-seq:
-  #   FlacInfo.padding_del!()   --> Boolean
-  #
-  # Returns true if the padding block is
-  # successfully removed else false.
-  #
-  def padding_del!
-    remove_padding_block ? true : false
-  end
-
-  # Resizes a padding block
-  #
-  # :call-seq:
-  #   FlacInfo.padding_resize!(size)   --> Boolean
-  #
-  # 'size' is an optional integer argument for the
-  # size of the new padding block. It defaults to 4096 bytes.
-  # Returns true if successful, else false.
-  #
-  def padding_resize!(size = 4096)
-    remove_padding_block
-    build_padding_block(size)
-  end
-
   #--
   #  This cleans up the output when using FlacInfo in irb
   def inspect # :nodoc:
@@ -1342,127 +1308,72 @@ class FlacInfo
     @flac = Stream.new(@filename)
   end
 
-  def write_to_disk
-    raise FlacInfoWriteError, 'No changes to write' if @comments_changed.nil?
+  # The following code is deprecated and will be removed
+  #
+  # def write_to_disk
+  #   raise FlacInfoWriteError, 'No changes to write' if @comments_changed.nil?
+  #
+  #   #  Build the VORBIS_COMMENT data
+  #   vcd = build_vorbis_comment_block
+  #   #  Build the VORBIS_COMMENT header
+  #   vch = build_block_header(4, vcd.length, 0)
+  #
+  #   #  Determine if we can shuffle the data or if a rewrite is necessary
+  #   begin
+  #     if !@padding.key?('block_size') || (vcd.length > @padding['block_size'])
+  #       rewrite(vcd, vch)  # Rewriting is simpler but more expensive
+  #     else
+  #       shuffle(vcd, vch)  # Shuffling is more complicated but cheaper
+  #     end
+  #     parse_flac_meta_blocks #  Parse the file again to update new values
+  #     true
+  #   rescue StandardError => e
+  #     raise FlacInfoWriteError, "error writing new data to #{@filename}: #{e.message}"
+  #   end
+  # end
 
-    #  Build the VORBIS_COMMENT data
-    vcd = build_vorbis_comment_block
-    #  Build the VORBIS_COMMENT header
-    vch = build_block_header(4, vcd.length, 0)
-
-    #  Determine if we can shuffle the data or if a rewrite is necessary
-    begin
-      if !@padding.key?('block_size') || (vcd.length > @padding['block_size'])
-        rewrite(vcd, vch)  # Rewriting is simpler but more expensive
-      else
-        shuffle(vcd, vch)  # Shuffling is more complicated but cheaper
-      end
-      parse_flac_meta_blocks #  Parse the file again to update new values
-      true
-    rescue StandardError => e
-      raise FlacInfoWriteError, "error writing new data to #{@filename}: #{e.message}"
-    end
-  end
-
-  #  Shuffle the data and update the PADDING block
-  def shuffle(vcd, vch)
-    flac = File.new(@filename, 'r+b')
-    flac.binmode #  For Windows folks...
-
-    #  Position ourselves at end of current Vorbis block
-    flac.seek(@tags['offset'] + @tags['block_size'], IO::SEEK_SET)
-    #  The data we need to shuffle starts at current position and ends at
-    #  the beginning of the padding block, so the size we need to read is:
-    #
-    #  (offset of padding minus 4 bytes for the padding header) minus our current position
-    #
-    size_to_read = (@padding['offset'] - 4) - flac.tell
-    data_to_shuffle = flac.read(size_to_read)
-
-    flac.seek(@tags['offset'] - 4, IO::SEEK_SET)
-    flac.write(vch)              #  Write the VORBIS_COMMENT header
-    flac.write(vcd)              #  Write the VORBIS_COMMENT data
-    flac.write(data_to_shuffle)  #  Write the shuffled data
-
-    new_padding_size = @padding['block_size'] - (vcd.length - @tags['block_size'])
-    ph = build_block_header(1, new_padding_size, 1) #  Build the new PADDING header
-
-    flac.write(ph)  #  Write the new PADDING header
-    flac.close      #  ...and we're done
-  end
-
-  #  Rewrite the entire file
-  def rewrite(vcd, vch)
-    flac = File.new(@filename, 'r+b')
-    flac.binmode #  For Windows folks...
-
-    flac.seek(@tags['offset'] + @tags['block_size'], IO::SEEK_SET)
-    rest_of_file = flac.read
-    flac.seek(@tags['offset'] - 4, IO::SEEK_SET)
-
-    flac.write(vch)           #  Write the VORBIS_COMMENT header
-    flac.write(vcd)           #  Write the VORBIS_COMMENT data
-    flac.write(rest_of_file)  #  Write the rest of the file
-
-    flac.close
-  end
-
-  # remove the padding block
-  def remove_padding_block
-    new_last_block = @metadata_blocks[-2]
-
-    flac = File.new(@filename, 'r+b')
-    flac.binmode
-
-    flac.seek(@padding['offset'] + @padding['block_size'], IO::SEEK_SET)
-    rest_of_file = flac.read
-
-    flac.seek(@padding['offset'] - 4, IO::SEEK_SET)
-    flac.write(rest_of_file)
-    # Truncate the file at the 'new' end of file.
-    flac.truncate(flac.tell)
-
-    nbh = build_block_header(new_last_block[1], new_last_block[4], 1)
-
-    flac.seek(new_last_block[3] - 4, IO::SEEK_SET)
-    flac.write(nbh)
-    flac.close
-
-    parse_flac_meta_blocks  #  Parse the file again to update new values
-    true
-  rescue StandardError => e
-    raise FlacInfoWriteError, "Could not update padding block: #{e.message}"
-  end
-
-  def build_padding_block(size)
-    old_last_block = @metadata_blocks[-1]
-
-    a = Array.new(size / 2, 0)
-    pbd = a.pack('v*')
-    pbh = build_block_header(1, size, 1)
-
-    flac = File.new(@filename, 'r+b')
-    flac.binmode
-
-    flac.seek(old_last_block[4] + old_last_block[3], IO::SEEK_SET)
-    co = flac.tell
-    rest_of_file = flac.read
-    flac.seek(co, IO::SEEK_SET)
-
-    flac.write(pbh)
-    flac.write(pbd)
-    flac.write(rest_of_file)
-    nbh = build_block_header(old_last_block[1], old_last_block[4], 0)
-
-    flac.seek(old_last_block[3] - 4, IO::SEEK_SET)
-    flac.write(nbh)
-
-    flac.close
-    parse_flac_meta_blocks  #  Parse the file again to update new values
-    true
-  rescue StandardError => e
-    raise FlacInfoWriteError, "Could not update padding block: #{e.message}"
-  end
+  # #  Shuffle the data and update the PADDING block
+  # def shuffle(vcd, vch)
+  #   flac = File.new(@filename, 'r+b')
+  #   flac.binmode #  For Windows folks...
+  #
+  #   #  Position ourselves at end of current Vorbis block
+  #   flac.seek(@tags['offset'] + @tags['block_size'], IO::SEEK_SET)
+  #   #  The data we need to shuffle starts at current position and ends at
+  #   #  the beginning of the padding block, so the size we need to read is:
+  #   #
+  #   #  (offset of padding minus 4 bytes for the padding header) minus our current position
+  #   #
+  #   size_to_read = (@padding['offset'] - 4) - flac.tell
+  #   data_to_shuffle = flac.read(size_to_read)
+  #
+  #   flac.seek(@tags['offset'] - 4, IO::SEEK_SET)
+  #   flac.write(vch)              #  Write the VORBIS_COMMENT header
+  #   flac.write(vcd)              #  Write the VORBIS_COMMENT data
+  #   flac.write(data_to_shuffle)  #  Write the shuffled data
+  #
+  #   new_padding_size = @padding['block_size'] - (vcd.length - @tags['block_size'])
+  #   ph = build_block_header(1, new_padding_size, 1) #  Build the new PADDING header
+  #
+  #   flac.write(ph)  #  Write the new PADDING header
+  #   flac.close      #  ...and we're done
+  # end
+  #
+  # #  Rewrite the entire file
+  # def rewrite(vcd, vch)
+  #   flac = File.new(@filename, 'r+b')
+  #   flac.binmode #  For Windows folks...
+  #
+  #   flac.seek(@tags['offset'] + @tags['block_size'], IO::SEEK_SET)
+  #   rest_of_file = flac.read
+  #   flac.seek(@tags['offset'] - 4, IO::SEEK_SET)
+  #
+  #   flac.write(vch)           #  Write the VORBIS_COMMENT header
+  #   flac.write(vcd)           #  Write the VORBIS_COMMENT data
+  #   flac.write(rest_of_file)  #  Write the rest of the file
+  #
+  #   flac.close
+  # end
 end
 
 # If called directly from the command line, run meta_flac on each argument
