@@ -144,7 +144,7 @@ class Stream
     @io.close
   end
 
-  # If a complete re-write is necessary, using a tmpfile i the fastest/safest approach.
+  # If a complete re-write is necessary, using a tmpfile is the fastest/safest approach.
   def write_tmp_file(filename = nil)
     outfile = filename || @filename
 
