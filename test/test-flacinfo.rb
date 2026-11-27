@@ -169,3 +169,13 @@ class TestFlacInfoFileTwo < Test::Unit::TestCase
   #   assert_equal(38_456, @flac.padding.offset)
   # end
 end
+
+class TestFlacInfoFileThree < Test::Unit::TestCase
+  def setup
+    @flac = FlacInfo.new('test3.flac')
+  end
+
+  def test_vorbis_comment_utf8
+    assert_equal('UTF-8 é°Æü', @flac.tags['COMMENT'])
+  end
+end
