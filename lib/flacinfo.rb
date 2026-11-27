@@ -732,7 +732,7 @@ class VorbisComment < Block
     n = 0
     user_comment_list_length.times do
       length = @io.read(4).unpack1('L<')
-      @comment[n] = @io.read(length)
+      @comment[n] = @io.read(length).force_encoding('UTF-8')
       n += 1
     end
 

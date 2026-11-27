@@ -26,8 +26,10 @@ class TestFlacInfoFileOne < Test::Unit::TestCase
   end
 
   def test_vorbis_comments
-    assert_equal(294, @flac.tags['block_size'])
-    assert_equal(46, @flac.tags['offset'])
+    assert_equal(294, @flac.vorbis_comment.block_size)
+    assert_equal(46, @flac.vorbis_comment.offset)
+    assert_equal('reference libFLAC 1.2.0 20070715', @flac.vorbis_comment.vendor_tag)
+
     assert_equal('test.flac', @flac.tags['TITLE'])
     assert_equal('Darren Kirby', @flac.tags['ARTIST'])
     assert_equal('No Thanks', @flac.tags['COPYRIGHT'])
@@ -36,7 +38,6 @@ class TestFlacInfoFileOne < Test::Unit::TestCase
     assert_equal('Spoken Word', @flac.tags['GENRE'])
     assert_equal('Wed Aug 15 14:28:07 2007', @flac.tags['DATE'])
     assert_equal('IN UR COMPUTER READING UR FLACS', @flac.tags['LOCATION'])
-    assert_equal('reference libFLAC 1.2.0 20070715', @flac.tags['vendor_tag'])
   end
 
   def test_picture_one
@@ -167,4 +168,14 @@ class TestFlacInfoFileTwo < Test::Unit::TestCase
   #   assert_equal(258,    @flac.padding.block_size)
   #   assert_equal(38_456, @flac.padding.offset)
   # end
+end
+
+class TestFlacInfoFileThree < Test::Unit::TestCase
+  def setup
+    @flac = FlacInfo.new('test3.flac')
+  end
+
+  def test_vorbis_comment_utf8
+    assert_equal('UTF-8 é°Æü', @flac.tags['COMMENT'])
+  end
 end
